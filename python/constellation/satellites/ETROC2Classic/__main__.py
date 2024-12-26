@@ -8,7 +8,7 @@ Provides the entry point for the Mariner example satellite
 from constellation.core.base import setup_cli_logging, EPILOG
 from constellation.core.satellite import SatelliteArgumentParser
 
-from .Mariner import Mariner
+from .ETROC2Classic import ETROC2Classic
 
 
 def main(args=None):
@@ -20,7 +20,7 @@ def main(args=None):
     setup_cli_logging(args["name"], args.pop("log_level"))
 
     # Start satellite with remaining args
-    s = Mariner(**args)
+    s = ETROC2Classic(**args)
     s.run_satellite()
 
 
