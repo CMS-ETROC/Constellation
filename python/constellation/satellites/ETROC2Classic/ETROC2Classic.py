@@ -269,10 +269,10 @@ class ETROC2Classic(Satellite):
         modified_timestamp = modified_timestamp[:-2] + '10'
         timestamp(self.connection_socket, key = int(modified_timestamp, base=2))
         time.sleep(0.1)
-        self.log.debug("Status of DAQ Toggle before Start Pulse: ", format(read_status_reg(self.connection_socket, 5), '016b'))
+        self.log.debug(f"Status of DAQ Toggle before Start Pulse: {format(read_status_reg(self.connection_socket, 5), '016b')}")
         start_DAQ_pulse(self.connection_socket)
         time.sleep(0.1)
-        self.log.debug("Status of DAQ Toggle after Start Pulse: ", format(read_status_reg(self.connection_socket, 5), '016b'))
+        self.log.debug(f"Status of DAQ Toggle after Start Pulse: {format(read_status_reg(self.connection_socket, 5), '016b')}")
  
         return f"Run {run_identifier} Session Started"
     
@@ -286,10 +286,10 @@ class ETROC2Classic(Satellite):
         modified_timestamp = modified_timestamp[:-2] + '10'
         timestamp(self.connection_socket, key = int(modified_timestamp, base=2))
         time.sleep(0.1)
-        self.log.debug("Status of DAQ Toggle before Stop Pulse: ", format(read_status_reg(self.connection_socket, 5), '016b'))
+        self.log.debug(f"Status of DAQ Toggle before Stop Pulse: {format(read_status_reg(self.connection_socket, 5), '016b')}")
         stop_DAQ_pulse(self.connection_socket)
         time.sleep(0.1)
-        self.log.debug("Status of DAQ Toggle after Stop Pulse: ", format(read_status_reg(self.connection_socket, 5), '016b'))
+        self.log.debug(f"Status of DAQ Toggle after Stop Pulse: {format(read_status_reg(self.connection_socket, 5), '016b')}")
 
         # Packacking the EOR Message
         tmp_EOR = {}
