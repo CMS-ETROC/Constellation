@@ -12,8 +12,8 @@ import datetime
 import os
 import pathlib
 import socket
-import command_interpret
-import daq_helpers
+from .command_interpret import *
+from .daq_helpers import *
 import numpy as np
 
 from constellation.core.cmdp import MetricsType
@@ -78,73 +78,73 @@ class ETROC2Classic(Satellite):
         if('uniform' in words): uniform_mode=True
 
         if(Initialize):
-            daq_helpers.register_11(self.connection_socket, 0x0deb)
+            register_11(self.connection_socket, 0x0deb)
             time.sleep(0.01)
 
         # IDLE
-        daq_helpers.register_12(self.connection_socket, 0x0070 if Triggerbit else 0x0030)
-        daq_helpers.register_10(self.connection_socket, self.prescale_factor, 0x000)
-        daq_helpers.register_9(self.connection_socket, 0xdeb)
-        daq_helpers.fc_init_pulse(self.connection_socket)
+        register_12(self.connection_socket, 0x0070 if Triggerbit else 0x0030)
+        register_10(self.connection_socket, self.prescale_factor, 0x000)
+        register_9(self.connection_socket, 0xdeb)
+        fc_init_pulse(self.connection_socket)
         time.sleep(0.01)
 
         if(BCR):
             # BCR
-            daq_helpers.register_12(self.connection_socket, 0x0072 if Triggerbit else 0x0032)
-            daq_helpers.register_10(self.connection_socket, self.prescale_factor, 0x000)
-            daq_helpers.register_9(self.connection_socket, 0x000)
-            daq_helpers.fc_init_pulse(self.connection_socket)
+            register_12(self.connection_socket, 0x0072 if Triggerbit else 0x0032)
+            register_10(self.connection_socket, self.prescale_factor, 0x000)
+            register_9(self.connection_socket, 0x000)
+            fc_init_pulse(self.connection_socket)
             time.sleep(0.01)
 
         # QInj FC
         if(QInj):
-            daq_helpers.register_12(self.connection_socket, 0x0075 if Triggerbit else 0x0035)
-            daq_helpers.register_10(self.connection_socket, self.prescale_factor, 0x005)
-            daq_helpers.register_9(self.connection_socket, 0x005)
-            daq_helpers.fc_init_pulse(self.connection_socket)
+            register_12(self.connection_socket, 0x0075 if Triggerbit else 0x0035)
+            register_10(self.connection_socket, self.prescale_factor, 0x005)
+            register_9(self.connection_socket, 0x005)
+            fc_init_pulse(self.connection_socket)
             time.sleep(0.01)
             if(repeatedQInj):
                 interval = (3000//16)//qinj_loop
                 for i in range(qinj_loop):
-                    daq_helpers.register_12(self.connection_socket, 0x0075 if Triggerbit else 0x0035)
+                    register_12(self.connection_socket, 0x0075 if Triggerbit else 0x0035)
                     if not (uniform_mode):
-                        daq_helpers.register_10(self.connection_socket, self.prescale_factor, 0x005 + i*0x010)
-                        daq_helpers.register_9(self.connection_socket, 0x005 + i*0x010)
-                        daq_helpers.fc_init_pulse(self.connection_socket)
+                        register_10(self.connection_socket, self.prescale_factor, 0x005 + i*0x010)
+                        register_9(self.connection_socket, 0x005 + i*0x010)
+                        fc_init_pulse(self.connection_socket)
                         time.sleep(0.01)
                     else:
-                        daq_helpers.register_10(self.connection_socket, self.prescale_factor, 0x005 + interval * i*0x010)
-                        daq_helpers.register_9(self.connection_socket, 0x005 + interval * i*0x010)
-                        daq_helpers.fc_init_pulse(self.connection_socket)
+                        register_10(self.connection_socket, self.prescale_factor, 0x005 + interval * i*0x010)
+                        register_9(self.connection_socket, 0x005 + interval * i*0x010)
+                        fc_init_pulse(self.connection_socket)
                         time.sleep(0.01)
                         pass
 
         ### Send L1A
         if(L1A):
-            daq_helpers.register_12(self.connection_socket, 0x0076 if Triggerbit else 0x0036)
-            daq_helpers.register_10(self.connection_socket, self.prescale_factor, 0x1fd)
-            daq_helpers.register_9(self.connection_socket, 0x1fd)
-            daq_helpers.fc_init_pulse(self.connection_socket)
+            register_12(self.connection_socket, 0x0076 if Triggerbit else 0x0036)
+            register_10(self.connection_socket, self.prescale_factor, 0x1fd)
+            register_9(self.connection_socket, 0x1fd)
+            fc_init_pulse(self.connection_socket)
             time.sleep(0.01)
 
             ### Send L1A Range
             if(L1ARange):
                 interval = (3000//16)//qinj_loop
                 for i in range(qinj_loop):
-                    daq_helpers.register_12(self.connection_socket, 0x0076 if Triggerbit else 0x0036)
+                    register_12(self.connection_socket, 0x0076 if Triggerbit else 0x0036)
                     if not (uniform_mode):
-                        daq_helpers.register_10(self.connection_socket, self.prescale_factor, 0x1fd + i*0x010)
-                        daq_helpers.register_9(self.connection_socket, 0x1fd + i*0x010)
-                        daq_helpers.fc_init_pulse(self.connection_socket)
+                        register_10(self.connection_socket, self.prescale_factor, 0x1fd + i*0x010)
+                        register_9(self.connection_socket, 0x1fd + i*0x010)
+                        fc_init_pulse(self.connection_socket)
                         time.sleep(0.01)
                     else:
-                        daq_helpers.register_10(self.connection_socket, self.prescale_factor, 0x1fd + interval * i*0x010)
-                        daq_helpers.register_9(self.connection_socket, 0x1fd + interval * i*0x010)
-                        daq_helpers.fc_init_pulse(self.connection_socket)
+                        register_10(self.connection_socket, self.prescale_factor, 0x1fd + interval * i*0x010)
+                        register_9(self.connection_socket, 0x1fd + interval * i*0x010)
+                        fc_init_pulse(self.connection_socket)
                         time.sleep(0.01)
 
 
-        daq_helpers.fc_signal_start(self.connection_socket)
+        fc_signal_start(self.connection_socket)
         time.sleep(0.01)
 
     def do_initializing(self, config: Configuration) -> str:
@@ -188,14 +188,14 @@ class ETROC2Classic(Satellite):
         except socket.error:
             raise ConnectionError(f"Failed to connect to IP: {self.hostname}:{self.port}")
         # print("Setting firmware...")
-        daq_helpers.active_channels(self.connection_socket, key = self.active_channel)
-        daq_helpers.timestamp(self.connection_socket, key = self.timestamp)
-        daq_helpers.triggerBitDelay(self.connection_socket, key = self.trigger_bit_delay)
-        daq_helpers.register_10(self.connection_socket, prescale_factor = self.prescale_factor)
-        daq_helpers.Enable_FPGA_Descramblber(self.connection_socket, val = self.polarity)
+        active_channels(self.connection_socket, key = self.active_channel)
+        timestamp(self.connection_socket, key = self.timestamp)
+        triggerBitDelay(self.connection_socket, key = self.trigger_bit_delay)
+        register_10(self.connection_socket, prescale_factor = self.prescale_factor)
+        Enable_FPGA_Descramblber(self.connection_socket, val = self.polarity)
         # if(options.counter_duration):
         #     print("Setting Counter Duration and Channel Delays...")
-        daq_helpers.counterDuration(self.connection_socket, key = self.counter_duration)
+        counterDuration(self.connection_socket, key = self.counter_duration)
         self.configure_memo_FC()
         self.log.info(f"Socket connected, FPGA Registers and Fast Command configured")
         return f"Launched"
@@ -215,22 +215,22 @@ class ETROC2Classic(Satellite):
             raise ValueError("Reconfiguring port is not possible")
         if "polarity" in config_keys:
             self.polarity = partial_config["polarity"]
-            daq_helpers.Enable_FPGA_Descramblber(self.connection_socket, val = self.polarity)
+            Enable_FPGA_Descramblber(self.connection_socket, val = self.polarity)
         if "timestamp" in config_keys:
             self.timestamp = partial_config["timestamp"]
-            daq_helpers.timestamp(self.connection_socket, key = self.timestamp)
+            timestamp(self.connection_socket, key = self.timestamp)
         if "active_channels" in config_keys:
             self.active_channels = partial_config["active_channels"]
-            daq_helpers.active_channels(self.connection_socket, key = self.active_channels)
+            active_channels(self.connection_socket, key = self.active_channels)
         if "trigger_bit_delay" in config_keys:
             self.trigger_bit_delay = partial_config["trigger_bit_delay"]
-            daq_helpers.triggerBitDelay(self.connection_socket, key = self.trigger_bit_delay)
+            triggerBitDelay(self.connection_socket, key = self.trigger_bit_delay)
         if "counter_duration" in config_keys:
             self.counter_duration = partial_config["counter_duration"]
-            daq_helpers.counterDuration(self.connection_socket, key = self.counter_duration)
+            counterDuration(self.connection_socket, key = self.counter_duration)
         if "prescale_factor" in config_keys:
             self.prescale_factor = partial_config["prescale_factor"]
-            daq_helpers.register_10(self.connection_socket, prescale_factor = self.prescale_factor)
+            register_10(self.connection_socket, prescale_factor = self.prescale_factor)
         if "fast_command_memo" in config_keys:
             self.fast_command_memo = partial_config["fast_command_memo"]
         self.configure_memo_FC()
@@ -249,30 +249,30 @@ class ETROC2Classic(Satellite):
         tmp_BOR["start_time"] = self.run_start_time
         tmp_BOR["run_identifier"] = self.run_identifier
         for reg in range(7,16):
-            tmp_BOR[f"register_{reg}"] = command_interpret.read_config_reg(self.connection_socket, reg)
+            tmp_BOR[f"register_{reg}"] = read_config_reg(self.connection_socket, reg)
         self.BOR = tmp_BOR
         time.sleep(0.1)  # add sleep to make sure that everything has stopped
 
         # FPGA Presteps for DAQ
         if(self.clear_fifo):
             self.log.info("Clearing FIFO...")
-            daq_helpers.software_clear_fifo(self.connection_socket)
+            software_clear_fifo(self.connection_socket)
             time.sleep(2.1)
             self.log.info("Waited for 2.1 secs")
         if(self.reset_counter):
-            daq_helpers.software_clear_error(self.connection_socket)
+            software_clear_error(self.connection_socket)
             time.sleep(0.1)
             self.log.info("Cleared Event Counter")
         # Start DAQ Session on FPGA
         self.log.info("Starting DAQ Session on FPGA...")
         modified_timestamp = format(self.timestamp, '016b')
         modified_timestamp = modified_timestamp[:-2] + '10'
-        daq_helpers.timestamp(self.connection_socket, key = int(modified_timestamp, base=2))
+        timestamp(self.connection_socket, key = int(modified_timestamp, base=2))
         time.sleep(0.1)
-        self.log.debug("Status of DAQ Toggle before Start Pulse: ", format(command_interpret.read_status_reg(self.connection_socket, 5), '016b'))
-        daq_helpers.start_DAQ_pulse(self.connection_socket)
+        self.log.debug("Status of DAQ Toggle before Start Pulse: ", format(read_status_reg(self.connection_socket, 5), '016b'))
+        start_DAQ_pulse(self.connection_socket)
         time.sleep(0.1)
-        self.log.debug("Status of DAQ Toggle after Start Pulse: ", format(command_interpret.read_status_reg(self.connection_socket, 5), '016b'))
+        self.log.debug("Status of DAQ Toggle after Start Pulse: ", format(read_status_reg(self.connection_socket, 5), '016b'))
  
         return f"Run {run_identifier} Session Started"
     
@@ -284,18 +284,18 @@ class ETROC2Classic(Satellite):
         self.log.info("Stopping DAQ on FPGA...")
         modified_timestamp = format(self.timestamp, '016b')
         modified_timestamp = modified_timestamp[:-2] + '10'
-        daq_helpers.timestamp(self.connection_socket, key = int(modified_timestamp, base=2))
+        timestamp(self.connection_socket, key = int(modified_timestamp, base=2))
         time.sleep(0.1)
-        self.log.debug("Status of DAQ Toggle before Stop Pulse: ", format(command_interpret.read_status_reg(self.connection_socket, 5), '016b'))
-        daq_helpers.stop_DAQ_pulse(self.connection_socket)
+        self.log.debug("Status of DAQ Toggle before Stop Pulse: ", format(read_status_reg(self.connection_socket, 5), '016b'))
+        stop_DAQ_pulse(self.connection_socket)
         time.sleep(0.1)
-        self.log.debug("Status of DAQ Toggle after Stop Pulse: ", format(command_interpret.read_status_reg(self.connection_socket, 5), '016b'))
+        self.log.debug("Status of DAQ Toggle after Stop Pulse: ", format(read_status_reg(self.connection_socket, 5), '016b'))
 
         # Packacking the EOR Message
         tmp_EOR = {}
         tmp_EOR["stop_time"] = time.strftime("%Y-%m-%d-%H%M%S", time.localtime())
         for reg in range(7,16):
-            tmp_EOR[f"register_{reg}"] = command_interpret.read_config_reg(self.connection_socket, reg)
+            tmp_EOR[f"register_{reg}"] = read_config_reg(self.connection_socket, reg)
         self.EOR = tmp_EOR
         return f"Run {self.run_identifier} Stopped, EOR Sent"
 
@@ -304,7 +304,7 @@ class ETROC2Classic(Satellite):
         self.log.debug("ETROC2Classic satellite running, publishing events...")
         while not self._state_thread_evt.is_set():
             # Main DAQ-loop
-            mem_data = np.array(command_interpret.read_data_fifo(self.connection_socket, self.num_fifo_read))
+            mem_data = np.array(read_data_fifo(self.connection_socket, self.num_fifo_read))
             if mem_data.size == 0:
                 self.log.debug("No data in buffer! Will try to read again")
                 time.sleep(1.01)
@@ -334,7 +334,7 @@ class ETROC2Classic(Satellite):
         #     return "FPGA not ready", None, {}
         paramList = request.payload
         reg = paramList[0]
-        return "FPGA is Ready", format(command_interpret.read_config_reg(self.connection_socket, reg), '016b'), {}
+        return "FPGA is Ready", format(read_config_reg(self.connection_socket, reg), '016b'), {}
     def _get_config_register_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
@@ -346,7 +346,7 @@ class ETROC2Classic(Satellite):
         """
         paramList = request.payload
         reg = paramList[0]
-        return "FPGA is Ready", format(command_interpret.read_status_reg(self.connection_socket, reg), '016b'), {}
+        return "FPGA is Ready", format(read_status_reg(self.connection_socket, reg), '016b'), {}
     def _get_status_register_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
