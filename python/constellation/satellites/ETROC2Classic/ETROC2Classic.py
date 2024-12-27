@@ -201,9 +201,9 @@ class ETROC2Classic(Satellite):
         return f"Launched"
 
     def do_landing(self) -> str:
+        self.configure_memo_FC(memo="Triggerbit")
         self.connection_socket.shutdown(socket.SHUT_RDWR)
         self.connection_socket.close()
-        self.configure_memo_FC(memo="Triggerbit")
         self.log.info(f"Socket shutdown and closed, Fast Command idling")
         return f"Landed"
 
