@@ -315,7 +315,7 @@ class ETROC2Classic(Satellite):
                 "dtype": f"{mem_data.dtype}",
             }
             # Format payload to serializable
-            self.data_queue.put((mem_data.tobytes(), meta))
+            # self.data_queue.put((mem_data.tobytes(), meta))
         return "Finished acquisition"
     
     @cscp_requestable
