@@ -196,6 +196,11 @@ class ETROC2Classic(Satellite):
         # if(options.counter_duration):
         #     print("Setting Counter Duration and Channel Delays...")
         counterDuration(self.connection_socket, key = self.counter_duration)
+        if(self.clear_fifo):
+            self.log.info("Clearing FIFO...")
+            software_clear_fifo(self.connection_socket)
+            time.sleep(2.1)
+            self.log.info("Waited for 2.1 secs")
         self.configure_memo_FC()
         self.log.info(f"Socket connected, FPGA Registers and Fast Command configured")
         return f"Launched"
@@ -248,17 +253,12 @@ class ETROC2Classic(Satellite):
         tmp_BOR = {}
         tmp_BOR["start_time"] = self.run_start_time
         tmp_BOR["run_identifier"] = self.run_identifier
-        for reg in range(7,16):
-            tmp_BOR[f"register_{reg}"] = read_config_reg(self.connection_socket, reg)
+        # for reg in range(7,16):
+        #     tmp_BOR[f"register_{reg}"] = read_config_reg(self.connection_socket, reg)
         self.BOR = tmp_BOR
         time.sleep(0.1)  # add sleep to make sure that everything has stopped
 
         # FPGA Presteps for DAQ
-        if(self.clear_fifo):
-            self.log.info("Clearing FIFO...")
-            software_clear_fifo(self.connection_socket)
-            time.sleep(2.1)
-            self.log.info("Waited for 2.1 secs")
         if(self.reset_counter):
             software_clear_error(self.connection_socket)
             time.sleep(0.1)
