@@ -6,14 +6,15 @@ Provides the entry point for the Mariner example satellite
 """
 
 from constellation.core.base import setup_cli_logging, EPILOG
-from constellation.core.satellite import SatelliteArgumentParser
+# from constellation.core.satellite import SatelliteArgumentParser
+from constellation.core.datasender import DataSenderArgumentParser
 
 from .ETROC2Classic import ETROC2Classic
 
 
 def main(args=None):
     # Get a dict of the parsed arguments
-    parser = SatelliteArgumentParser(description=main.__doc__, epilog=EPILOG)
+    parser = DataSenderArgumentParser(description=main.__doc__, epilog=EPILOG)
     args = vars(parser.parse_args(args))
 
     # Set up logging

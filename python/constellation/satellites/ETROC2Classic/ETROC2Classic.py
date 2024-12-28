@@ -23,8 +23,9 @@ from constellation.core.cscp import CSCPMessage
 from constellation.core.fsm import SatelliteState
 from constellation.core.monitoring import schedule_metric
 from constellation.core.satellite import Satellite
+from constellation.core.datasender import DataSender
 
-class ETROC2Classic(Satellite):
+class ETROC2Classic(DataSender):
     """Example for a Satellite class."""
 
     def print_all_config_params(self) -> None:
@@ -176,7 +177,7 @@ class ETROC2Classic(Satellite):
         # if ' '.join(message.split(' ')[:1]) == 'memoFC':
         self.log.info(f"Configuration loaded and Defaults set")
         self.print_all_config_params()
-        return "Initialized"
+        return "Initialized - Configuration loaded and Defaults set"
     
     def do_launching(self) -> str:
         try:
@@ -187,30 +188,33 @@ class ETROC2Classic(Satellite):
             self.connection_socket.connect((self.hostname, self.port))
         except socket.error:
             raise ConnectionError(f"Failed to connect to IP: {self.hostname}:{self.port}")
-        # print("Setting firmware...")
         active_channels(self.connection_socket, key = self.active_channel)
         timestamp(self.connection_socket, key = self.timestamp)
         triggerBitDelay(self.connection_socket, key = self.trigger_bit_delay)
         register_10(self.connection_socket, prescale_factor = self.prescale_factor)
         Enable_FPGA_Descramblber(self.connection_socket, val = self.polarity)
-        # if(options.counter_duration):
-        #     print("Setting Counter Duration and Channel Delays...")
         counterDuration(self.connection_socket, key = self.counter_duration)
         if(self.clear_fifo):
             self.log.info("Clearing FIFO...")
             software_clear_fifo(self.connection_socket)
             time.sleep(2.1)
-            self.log.info("Waited for 2.1 secs")
         self.configure_memo_FC()
         self.log.info(f"Socket connected, FPGA Registers and Fast Command configured")
-        return f"Launched"
+        return f"Launched - Socket connected, FPGA Registers and Fast Command configured"
 
     def do_landing(self) -> str:
         self.configure_memo_FC(memo="Triggerbit")
         self.connection_socket.shutdown(socket.SHUT_RDWR)
         self.connection_socket.close()
         self.log.info(f"Socket shutdown and closed, Fast Command idling")
-        return f"Landed"
+        return f"Landed - Socket shutdown and closed, Fast Command idling"
+    
+    def reentry(self) -> None:
+        self.configure_memo_FC(memo="Triggerbit")
+        self.connection_socket.shutdown(socket.SHUT_RDWR)
+        self.connection_socket.close()
+        self.log.info(f"REENTRY: Socket shutdown and closed, Fast Command idling")
+        super().reentry()
 
     def do_reconfigure(self, partial_config: Configuration) -> str:
         config_keys = partial_config.get_keys()
@@ -241,7 +245,7 @@ class ETROC2Classic(Satellite):
         self.configure_memo_FC()
         self.log.info(f"FPGA Registers and Fast Command reconfigured")
         self.print_all_config_params()
-        return f"Reconfigured"
+        return f"Reconfigured - FPGA Registers and Fast Command reconfigured"
     
     def do_starting(self, run_identifier: str) -> str:
         """
@@ -315,7 +319,7 @@ class ETROC2Classic(Satellite):
                 "dtype": f"{mem_data.dtype}",
             }
             # Format payload to serializable
-            # self.data_queue.put((mem_data.tobytes(), meta))
+            self.data_queue.put((mem_data.tobytes(), meta))
         return "Finished acquisition"
     
     @cscp_requestable
@@ -344,17 +348,21 @@ class ETROC2Classic(Satellite):
         """
         Return the requested Status Register from the FPGA.
         """
+        # we cannot perform this command when not ready:
+        # if self.fsm.current_state_value in [
+        #     SatelliteState.NEW,
+        #     SatelliteState.ERROR,
+        #     SatelliteState.DEAD,
+        #     SatelliteState.initializing,
+        #     SatelliteState.reconfiguring,
+        # ]:
+        #     return "FPGA not ready", None, {}
         paramList = request.payload
         reg = paramList[0]
         return "FPGA is Ready", format(read_status_reg(self.connection_socket, reg), '016b'), {}
     def _get_status_register_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
-        
-    # def reentry(self) -> None:
-    #     if hasattr(self, "device"):
-    #         self.device.release()
-    #     super().reentry()
 
     # def do_interrupting(self) -> str:
     #     """Power down but do not disconnect (e.g. keep monitoring)."""
