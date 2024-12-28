@@ -71,149 +71,84 @@ def read_memory(ss, Cnt, Addr):
 # @param[in] Cnt read data counts 0-65535
 def read_data_fifo(ss, Cnt):
     data = 0x00190000 + (Cnt -1)                        #write sDataFifoHigh address = 25
-    # print("before sendall() in read fifo()...")
     ss.sendall(struct.pack('I', data)[::-1])
-    # print("after sendall() in read fifo()...")
     mem_data = []
-    for i in range(Cnt-1):
-        # print(f"inside loop {i} to recv but before first recv this loop...")
+    fail_counter = 0
+    max_allowed_fails = 15
+    for i in range(Cnt):
         try:
             mem_data += [struct.unpack('I', ss.recv(4)[::-1])[0]]
         except struct.error:
-            print("not enough data in buffer to unpack...")
-            return mem_data
-        # print("Data fetched in this iteration: ", mem_data[-1])
-    try:
-        mem_data += [struct.unpack('I', ss.recv(4)[::-1])[0]]
-    except struct.error:
-        print("not enough data in buffer to unpack...")
-        return mem_data
-    # print(f"after final recv in read fifo...")
+            fail_counter = fail_counter + 1
+            RuntimeWarning(f"Not enough data in buffer to unpack... This is fail #{fail_counter}/{max_allowed_fails} allowed")
+        if(fail_counter>max_allowed_fails):
+            RuntimeWarning(f"Breaking with {len(mem_data)}/{Cnt} lines read!")
+            break
     return mem_data
 
 #--------------------------------------------------------------------------#
+# Following Info is current for commit https://github.com/CMS-ETROC/ETROC2TestFirmware/commit/e40cb281b88d957c9dea2cbba983f1004d6ffce2
+#--------------------------------------------------------------------------#
 # Pulse Register:
-# Reg[15:0] = 
-# {5'bxxx,stop_DAQ_pulse,start_DAQ_pulse,start_hist_counter,
-# resumePulse,clear_ws_trig_block_pulse,clrError,initPulse,
-# errInjPulse,fcStart,fifo_reset,START}
+# Reg[15:0] = {4'bxxxx,start_phase_detect,stop_DAQ_pulse,start_DAQ_pulse,start_hist_counter,resumePulse,clear_ws_trig_block_pulse,clrError,initPulse,errInjPulse,fcStart,fifo_reset,START}
+def write_pulse_reg_decoded(ss, key=""):
+    pulse_registers ={
+        "clear_fifo": 0x0002,
+        "fc_signal_start": 0x0004,
+        "err_inj": 0x0008,
+        "fc_init": 0x0010,
+        "reset_counter": 0x0020,
+        "clear_ws_block": 0x0040,
+        "resume_in_debug": 0x0080,
+        "start_hist_counter": 0x0100,
+        "start_DAQ": 0x0200,
+        "stop_DAQ": 0x0400,
+        "start_phase_detect": 0x0800,
+    }
+    if key not in pulse_registers:
+        RuntimeError("Invalid Pulse Register Key given!")
+    write_pulse_reg(ss, pulse_registers[key])
 
 #--------------------------------------------------------------------------#
-## software clear fifo
-## MSB..10, i.e., trigger pulser_reg[1]
-def software_clear_fifo(ss):
-    write_pulse_reg(ss, 0x0002)
-
-#--------------------------------------------------------------------------#
-## Reset and Resume state machine after exception in Debug Mode
-## MSB..10, i.e., trigger pulser_reg[7]
-def resume_in_debug_mode(ss):
-    write_pulse_reg(ss, 0x0080)
-
-#--------------------------------------------------------------------------#
-## software clear error. This should now clear the event counter
-## MSB..100000, i.e., trigger pulser_reg[5]
-def software_clear_error(ss):
-    write_pulse_reg(ss, 0x0020)
-
-#--------------------------------------------------------------------------#
-## ws clear trigger block.
-## i.e., trigger pulser_reg[6]
-def software_clear_ws_trig_block(ss):
-    write_pulse_reg(ss, 0x0040)
-
-#--------------------------------------------------------------------------#
-## Fast Command Signal Start
-## MSB..100, i.e., trigger pulser_reg[2]
-def fc_signal_start(ss):
-    write_pulse_reg(ss, 0x0004)
-
-#--------------------------------------------------------------------------#
-## Fast Command Initialize pulse
-## MSB..10000, i.e., trigger pulser_reg[4]
-def fc_init_pulse(ss):
-    write_pulse_reg(ss, 0x0010)
-
-#--------------------------------------------------------------------------#
-## start_hist_counter
-## MSB..100000000, i.e., trigger pulser_reg[8]
-def start_hist_counter(ss):
-    write_pulse_reg(ss, 0x0100)
-
-#--------------------------------------------------------------------------#
-## start_DAQ_pulse
-## MSB..1000000000, i.e., trigger pulser_reg[9]
-def start_DAQ_pulse(ss):
-    write_pulse_reg(ss, 0x0200)
-
-#--------------------------------------------------------------------------#
-## stop_DAQ_pulse
-## MSB..10000000000, i.e., trigger pulser_reg[10]
-def stop_DAQ_pulse(ss):
-    write_pulse_reg(ss, 0x0400)
-
-#--------------------------------------------------------------------------#
-## Register 14
-## Enable FPGA Descrambler
-## {12'bxxxxxxxxx,add_ethernet_filler,debug_mode,dumping_mode,notGTXPolarity,notGTX,enableAutoSync}
-def Enable_FPGA_Descramblber(ss, val=0x000b):
-    write_config_reg(ss, 14, val)
-
-#--------------------------------------------------------------------------#
-## Register 15
-## Reg 15 : {global_trig_delay[4:0],global_trig,trig_or_logic,triple_trig,en_ws_trig,ws_trig_stop_delay[2:0],enableCh[3:0]}
-def active_channels(ss, key = 0x0001):
-    print(f"writing: {bin(key)} into register 15")
-    write_config_reg(ss, 15, key)
-
-#--------------------------------------------------------------------------#
-## Register 13
-## Reg 13 : {dataRate[1:0],LED_Pages[2:0],status_Pages[1:0]} 
-def timestamp(ss, key=0x0000):
-    write_config_reg(ss, 13, key)
-
-#--------------------------------------------------------------------------#
-## Register 12
-## 4-digit 16 bit hex, 0xWXYZ
-## WX (8 bit) - Duration
-## Y - N/A,N/A,Period,Hold
-## Z - Input command
-def register_12(ss, key = 0x0000):
-    write_config_reg(ss, 12, key)
-
-#--------------------------------------------------------------------------#
-## Register 11
-## Reg 11 : {4'bxxxx,duration[11:0]} \ Reg 12 : {errorMask[7:0],trigDataSize[1:0],period,1'bx,inputCmd[3:0]} 
-def register_11(ss, key = 0x0000):
-    write_config_reg(ss, 11, key)
-
-## Register 10
-def register_10(ss, prescale_factor, init_address_first = 0x000):
+# Config Register:
+# Reg 4 : {WR_ADDR[7:0],WR_DATA0[7:0]} //I2C
+# Reg 5 : {6'bxxxxxx,MODE[1:0],SL_ADDR[6:0],SL_WR} //I2C
+# Reg 6 : {8'bxxxxxxxx, WR_DATA1[7:0]} //I2C
+# Reg 7 : {6'bxxxxxx,delayTrigCh[3:0],3'bxxx,dis_descr_raw_data,dis_regular_filler, inject_SEU} //trigbit delay or not
+# Reg 8 : {trigSelMask[3:0],enhenceData,enableL1Trig,L1Delay[9:0]}
+# Reg 9 : {4'bxxxx, initAddressLast[11:0]}
+# Reg 10 : {prescale_factor,initAddressFirst[11:0]}
+# Reg 11 : {duration[15:0]} \ Reg 12 : {errorMask[7:0],trigDataSize[1:0],period,1'bx,inputCmd[3:0]}
+# Reg 13 : {5'bxxxxx, data_delay[5:0],dataRate[1:0],LED_Pages[2:0],status_Pages[1:0]}
+# Reg 14 : {auto_prescale,fixed_time_filler,4'bxxxx,falling_edge,manual_mode,sample_event,simple_handshake,add_ethernet_filler,debug_mode,dumping_mode,notGTXPolarity,notGTX,enableAutoSync}
+# Reg 15 : {global_trig_delay[4:0],global_trig,trig_or_logic,triple_trig,en_ws_trig,ws_trig_stop_delay[2:0],enableCh[3:0]}
+def write_config_reg_decoded(ss, key="", val=None, prescale_factor=2048):
+    config_registers ={
+        "counter_duration": 7,
+        "triggerbit_delay": 8,
+        "register_9": 9,
+        "register_10": 10,
+        "register_11": 11,
+        "register_12": 12,
+        "timestamp": 13,
+        "polarity": 14,
+        "active_channel": 15,
+    }
     valid_prescale_factors = {
         2048: 0b00,
         4096: 0b01,
         8192: 0b10,
         16384: 0b11,
     }
-    if prescale_factor not in valid_prescale_factors:
-        raise RuntimeError("You did not choose a valid prescale factor")
-    prescale_bitmask = valid_prescale_factors[prescale_factor]
-    key = ((prescale_bitmask & 0b11) << 12) + (init_address_first & 0xfff)
-    write_config_reg(ss, 10, key)
-
-## Register 9
-def register_9(ss, init_address_last = 0x000):
-    key = (init_address_last & 0xfff)
-    write_config_reg(ss, 9, key)
-
-#--------------------------------------------------------------------------#
-## Register 8
-## Reg 8 : {trigSelMask[3:0],enhenceData,enableL1Trig,L1Delay[9:0]} 
-def triggerBitDelay(ss, key = 0x0400):
-    write_config_reg(ss, 8, key)
-
-#--------------------------------------------------------------------------#
-## Register 7
-## Reg 7 : {6'bxxxxxx,delayTrigCh[3:0],6'bxxxxxx} //trigbit delay or not 
-def counterDuration(ss, key = 0x0000):
-    write_config_reg(ss, 7, key)
+    if key not in config_registers:
+        RuntimeError("Invalid Config Register Key given!")
+    if val==None:
+        RuntimeError("No Val given to write to Config Register!")
+    if(config_registers[key])==10:
+        if prescale_factor not in valid_prescale_factors:
+            raise RuntimeError("You did not choose a valid prescale factor")
+        prescale_bitmask = valid_prescale_factors[prescale_factor]
+        mod_val = ((prescale_bitmask & 0b11) << 12) + (val & 0xfff)
+        write_config_reg(ss, 10, mod_val)
+    else:
+        write_config_reg(ss, config_registers[key], val)

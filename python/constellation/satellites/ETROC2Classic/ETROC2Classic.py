@@ -32,13 +32,13 @@ class ETROC2Classic(DataSender):
         self.log.debug("Printing All Config Params...")
         self.log.debug(f"hostname: {self.hostname}")
         self.log.debug(f"port: {self.port}")
-        self.log.debug(f"polarity: {self.polarity}")
-        self.log.debug(f"firmware: {self.firmware}")
-        self.log.debug(f"timestamp: {self.timestamp}")
-        self.log.debug(f"active_channel: {self.active_channel}")
+        self.log.debug(f"polarity: {hex(self.polarity)}")
+        self.log.debug(f"firmware: {hex(self.firmware)}")
+        self.log.debug(f"timestamp: {hex(self.timestamp)}")
+        self.log.debug(f"active_channel: {hex(self.active_channel)}")
         self.log.debug(f"prescale_factor: {self.prescale_factor}")
-        self.log.debug(f"counter_duration: {self.counter_duration}")
-        self.log.debug(f"trigger_bit_delay: {self.trigger_bit_delay}")
+        self.log.debug(f"counter_duration: {hex(self.counter_duration)}")
+        self.log.debug(f"trigger_bit_delay: {hex(self.trigger_bit_delay)}")
         self.log.debug(f"num_fifo_read: {self.num_fifo_read}")
         self.log.debug(f"clear_fifo: {self.clear_fifo}")
         self.log.debug(f"reset_counter: {self.reset_counter}")
@@ -79,73 +79,66 @@ class ETROC2Classic(DataSender):
         if('uniform' in words): uniform_mode=True
 
         if(Initialize):
-            register_11(self.connection_socket, 0x0deb)
+            write_config_reg_decoded(self.connection_socket, "register_11", 0x0deb)
             time.sleep(0.01)
 
         # IDLE
-        register_12(self.connection_socket, 0x0070 if Triggerbit else 0x0030)
-        register_10(self.connection_socket, self.prescale_factor, 0x000)
-        register_9(self.connection_socket, 0xdeb)
-        fc_init_pulse(self.connection_socket)
+        write_config_reg_decoded(self.connection_socket, "register_12", 0x0070 if Triggerbit else 0x0030)
+        write_config_reg_decoded(self.connection_socket, "register_10", 0x000, self.prescale_factor)
+        write_config_reg_decoded(self.connection_socket, "register_9", 0xdeb)
+        write_pulse_reg_decoded(self.connection_socket, "fc_init")
         time.sleep(0.01)
 
         if(BCR):
-            # BCR
-            register_12(self.connection_socket, 0x0072 if Triggerbit else 0x0032)
-            register_10(self.connection_socket, self.prescale_factor, 0x000)
-            register_9(self.connection_socket, 0x000)
-            fc_init_pulse(self.connection_socket)
+            write_config_reg_decoded(self.connection_socket, "register_12", 0x0072 if Triggerbit else 0x0032)
+            write_config_reg_decoded(self.connection_socket, "register_10", 0x000, self.prescale_factor)
+            write_config_reg_decoded(self.connection_socket, "register_9", 0x000)
+            write_pulse_reg_decoded(self.connection_socket, "fc_init")
             time.sleep(0.01)
 
-        # QInj FC
         if(QInj):
-            register_12(self.connection_socket, 0x0075 if Triggerbit else 0x0035)
-            register_10(self.connection_socket, self.prescale_factor, 0x005)
-            register_9(self.connection_socket, 0x005)
-            fc_init_pulse(self.connection_socket)
+            write_config_reg_decoded(self.connection_socket, "register_12", 0x0075 if Triggerbit else 0x0035)
+            write_config_reg_decoded(self.connection_socket, "register_10", 0x005, self.prescale_factor)
+            write_config_reg_decoded(self.connection_socket, "register_9", 0x005)
+            write_pulse_reg_decoded(self.connection_socket, "fc_init")
             time.sleep(0.01)
             if(repeatedQInj):
                 interval = (3000//16)//qinj_loop
                 for i in range(qinj_loop):
-                    register_12(self.connection_socket, 0x0075 if Triggerbit else 0x0035)
+                    write_config_reg_decoded(self.connection_socket, "register_12", 0x0075 if Triggerbit else 0x0035)
                     if not (uniform_mode):
-                        register_10(self.connection_socket, self.prescale_factor, 0x005 + i*0x010)
-                        register_9(self.connection_socket, 0x005 + i*0x010)
-                        fc_init_pulse(self.connection_socket)
+                        write_config_reg_decoded(self.connection_socket, "register_10", 0x005 + i*0x010, self.prescale_factor)
+                        write_config_reg_decoded(self.connection_socket, "register_9", 0x005 + i*0x010)
+                        write_pulse_reg_decoded(self.connection_socket, "fc_init")
                         time.sleep(0.01)
                     else:
-                        register_10(self.connection_socket, self.prescale_factor, 0x005 + interval * i*0x010)
-                        register_9(self.connection_socket, 0x005 + interval * i*0x010)
-                        fc_init_pulse(self.connection_socket)
+                        write_config_reg_decoded(self.connection_socket, "register_10", 0x005 + interval * i*0x010, self.prescale_factor)
+                        write_config_reg_decoded(self.connection_socket, "register_9", 0x005 + interval * i*0x010)
+                        write_pulse_reg_decoded(self.connection_socket, "fc_init")
                         time.sleep(0.01)
-                        pass
 
-        ### Send L1A
         if(L1A):
-            register_12(self.connection_socket, 0x0076 if Triggerbit else 0x0036)
-            register_10(self.connection_socket, self.prescale_factor, 0x1fd)
-            register_9(self.connection_socket, 0x1fd)
-            fc_init_pulse(self.connection_socket)
+            write_config_reg_decoded(self.connection_socket, "register_12", 0x0076 if Triggerbit else 0x0036)
+            write_config_reg_decoded(self.connection_socket, "register_10", 0x1fd, self.prescale_factor)
+            write_config_reg_decoded(self.connection_socket, "register_9", 0x1fd)
+            write_pulse_reg_decoded(self.connection_socket, "fc_init")
             time.sleep(0.01)
-
-            ### Send L1A Range
             if(L1ARange):
                 interval = (3000//16)//qinj_loop
                 for i in range(qinj_loop):
-                    register_12(self.connection_socket, 0x0076 if Triggerbit else 0x0036)
+                    write_config_reg_decoded(self.connection_socket, "register_12", 0x0076 if Triggerbit else 0x0036)
                     if not (uniform_mode):
-                        register_10(self.connection_socket, self.prescale_factor, 0x1fd + i*0x010)
-                        register_9(self.connection_socket, 0x1fd + i*0x010)
-                        fc_init_pulse(self.connection_socket)
+                        write_config_reg_decoded(self.connection_socket, "register_10", 0x1fd + i*0x010, self.prescale_factor)
+                        write_config_reg_decoded(self.connection_socket, "register_9", 0x1fd + i*0x010)
+                        write_pulse_reg_decoded(self.connection_socket, "fc_init")
                         time.sleep(0.01)
                     else:
-                        register_10(self.connection_socket, self.prescale_factor, 0x1fd + interval * i*0x010)
-                        register_9(self.connection_socket, 0x1fd + interval * i*0x010)
-                        fc_init_pulse(self.connection_socket)
+                        write_config_reg_decoded(self.connection_socket, "register_10", 0x1fd + interval * i*0x010, self.prescale_factor)
+                        write_config_reg_decoded(self.connection_socket, "register_9", 0x1fd + interval * i*0x010)
+                        write_pulse_reg_decoded(self.connection_socket, "fc_init")
                         time.sleep(0.01)
 
-
-        fc_signal_start(self.connection_socket)
+        write_pulse_reg_decoded(self.connection_socket, "fc_signal_start")
         time.sleep(0.01)
 
     def do_initializing(self, config: Configuration) -> str:
@@ -165,7 +158,7 @@ class ETROC2Classic(DataSender):
         self.active_channel = config.setdefault("active_channel", 0x0001)
         self.prescale_factor = config.setdefault("prescale_factor", 2048)
         self.counter_duration = config.setdefault("counter_duration", 0x0000)
-        self.trigger_bit_delay = config.setdefault("trigger_bit_delay", 0x1800)
+        self.triggerbit_delay = config.setdefault("triggerbit_delay", 0x1800)
         self.num_fifo_read = config.setdefault("num_fifo_read", 65536)
         self.clear_fifo = config.setdefault("clear_fifo", True) 
         self.reset_counter = config.setdefault("reset_counter", True) 
@@ -188,15 +181,15 @@ class ETROC2Classic(DataSender):
             self.connection_socket.connect((self.hostname, self.port))
         except socket.error:
             raise ConnectionError(f"Failed to connect to IP: {self.hostname}:{self.port}")
-        active_channels(self.connection_socket, key = self.active_channel)
-        timestamp(self.connection_socket, key = self.timestamp)
-        triggerBitDelay(self.connection_socket, key = self.trigger_bit_delay)
-        register_10(self.connection_socket, prescale_factor = self.prescale_factor)
-        Enable_FPGA_Descramblber(self.connection_socket, val = self.polarity)
-        counterDuration(self.connection_socket, key = self.counter_duration)
+        write_config_reg_decoded(self.connection_socket, "active_channel", self.active_channel)
+        write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
+        write_config_reg_decoded(self.connection_socket, "triggerbit_delay", self.triggerbit_delay)
+        write_config_reg_decoded(self.connection_socket, "register_10", 0x000, prescale_factor = self.prescale_factor)
+        write_config_reg_decoded(self.connection_socket, "polarity", self.polarity)
+        write_config_reg_decoded(self.connection_socket, "counter_duration", self.counter_duration)
         if(self.clear_fifo):
             self.log.info("Clearing FIFO...")
-            software_clear_fifo(self.connection_socket)
+            write_pulse_reg_decoded(self.connection_socket, "clear_fifo")
             time.sleep(2.1)
         self.configure_memo_FC()
         self.log.info(f"Socket connected, FPGA Registers and Fast Command configured")
@@ -208,13 +201,6 @@ class ETROC2Classic(DataSender):
         self.connection_socket.close()
         self.log.info(f"Socket shutdown and closed, Fast Command idling")
         return f"Landed - Socket shutdown and closed, Fast Command idling"
-    
-    def reentry(self) -> None:
-        self.configure_memo_FC(memo="Triggerbit")
-        self.connection_socket.shutdown(socket.SHUT_RDWR)
-        self.connection_socket.close()
-        self.log.info(f"REENTRY: Socket shutdown and closed, Fast Command idling")
-        super().reentry()
 
     def do_reconfigure(self, partial_config: Configuration) -> str:
         config_keys = partial_config.get_keys()
@@ -224,22 +210,22 @@ class ETROC2Classic(DataSender):
             raise ValueError("Reconfiguring port is not possible")
         if "polarity" in config_keys:
             self.polarity = partial_config["polarity"]
-            Enable_FPGA_Descramblber(self.connection_socket, val = self.polarity)
+            write_config_reg_decoded(self.connection_socket, "polarity", self.polarity)
         if "timestamp" in config_keys:
             self.timestamp = partial_config["timestamp"]
-            timestamp(self.connection_socket, key = self.timestamp)
-        if "active_channels" in config_keys:
-            self.active_channels = partial_config["active_channels"]
-            active_channels(self.connection_socket, key = self.active_channels)
-        if "trigger_bit_delay" in config_keys:
-            self.trigger_bit_delay = partial_config["trigger_bit_delay"]
-            triggerBitDelay(self.connection_socket, key = self.trigger_bit_delay)
+            write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
+        if "active_channel" in config_keys:
+            self.active_channel = partial_config["active_channel"]
+            write_config_reg_decoded(self.connection_socket, "active_channel", self.active_channel)
+        if "triggerbit_delay" in config_keys:
+            self.triggerbit_delay = partial_config["triggerbit_delay"]
+            write_config_reg_decoded(self.connection_socket, "triggerbit_delay", self.triggerbit_delay)
         if "counter_duration" in config_keys:
             self.counter_duration = partial_config["counter_duration"]
-            counterDuration(self.connection_socket, key = self.counter_duration)
+            write_config_reg_decoded(self.connection_socket, "counter_duration", self.counter_duration)
         if "prescale_factor" in config_keys:
             self.prescale_factor = partial_config["prescale_factor"]
-            register_10(self.connection_socket, prescale_factor = self.prescale_factor)
+            write_config_reg_decoded(self.connection_socket, "register_10", 0x000, prescale_factor = self.prescale_factor)
         if "fast_command_memo" in config_keys:
             self.fast_command_memo = partial_config["fast_command_memo"]
         self.configure_memo_FC()
@@ -264,17 +250,17 @@ class ETROC2Classic(DataSender):
 
         # FPGA Presteps for DAQ
         if(self.reset_counter):
-            software_clear_error(self.connection_socket)
+            write_pulse_reg_decoded(self.connection_socket, "reset_counter")
             time.sleep(0.1)
             self.log.info("Cleared Event Counter")
         # Start DAQ Session on FPGA
         self.log.info("Starting DAQ Session on FPGA...")
         modified_timestamp = format(self.timestamp, '016b')
         modified_timestamp = modified_timestamp[:-2] + '10'
-        timestamp(self.connection_socket, key = int(modified_timestamp, base=2))
+        write_config_reg_decoded(self.connection_socket, "timestamp", int(modified_timestamp, base=2))
         time.sleep(0.1)
         self.log.debug(f"Status of DAQ Toggle before Start Pulse: {format(read_status_reg(self.connection_socket, 5), '016b')}")
-        start_DAQ_pulse(self.connection_socket)
+        write_pulse_reg_decoded(self.connection_socket, "start_DAQ")
         time.sleep(0.1)
         self.log.debug(f"Status of DAQ Toggle after Start Pulse: {format(read_status_reg(self.connection_socket, 5), '016b')}")
  
@@ -288,10 +274,10 @@ class ETROC2Classic(DataSender):
         self.log.info("Stopping DAQ on FPGA...")
         modified_timestamp = format(self.timestamp, '016b')
         modified_timestamp = modified_timestamp[:-2] + '10'
-        timestamp(self.connection_socket, key = int(modified_timestamp, base=2))
+        write_config_reg_decoded(self.connection_socket, "timestamp", int(modified_timestamp, base=2))
         time.sleep(0.1)
         self.log.debug(f"Status of DAQ Toggle before Stop Pulse: {format(read_status_reg(self.connection_socket, 5), '016b')}")
-        stop_DAQ_pulse(self.connection_socket)
+        write_pulse_reg_decoded(self.connection_socket, "stop_DAQ")
         time.sleep(0.1)
         self.log.debug(f"Status of DAQ Toggle after Stop Pulse: {format(read_status_reg(self.connection_socket, 5), '016b')}")
 
@@ -327,15 +313,6 @@ class ETROC2Classic(DataSender):
         """
         Return the requested Config Register from the FPGA.
         """
-        # we cannot perform this command when not ready:
-        # if self.fsm.current_state_value in [
-        #     SatelliteState.NEW,
-        #     SatelliteState.ERROR,
-        #     SatelliteState.DEAD,
-        #     SatelliteState.initializing,
-        #     SatelliteState.reconfiguring,
-        # ]:
-        #     return "FPGA not ready", None, {}
         paramList = request.payload
         reg = paramList[0]
         return "FPGA is Ready", format(read_config_reg(self.connection_socket, reg), '016b'), {}
@@ -348,33 +325,12 @@ class ETROC2Classic(DataSender):
         """
         Return the requested Status Register from the FPGA.
         """
-        # we cannot perform this command when not ready:
-        # if self.fsm.current_state_value in [
-        #     SatelliteState.NEW,
-        #     SatelliteState.ERROR,
-        #     SatelliteState.DEAD,
-        #     SatelliteState.initializing,
-        #     SatelliteState.reconfiguring,
-        # ]:
-        #     return "FPGA not ready", None, {}
         paramList = request.payload
         reg = paramList[0]
         return "FPGA is Ready", format(read_status_reg(self.connection_socket, reg), '016b'), {}
     def _get_status_register_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
-
-    # def do_interrupting(self) -> str:
-    #     """Power down but do not disconnect (e.g. keep monitoring)."""
-    #     self._power_down()
-    #     return "Interrupted and stopped HV."
-
-    # def fail_gracefully(self):
-    #     """Kill HV and disconnect."""
-    #     if getattr(self, "caen", None):
-    #         self._power_down()
-    #         self.caen.disconnect()
-    #     return "Powered down and disconnected from crate."
 
     # @schedule_metric("lm", MetricsType.LAST_VALUE, 10)
     # def brightness(self) -> int | None:
