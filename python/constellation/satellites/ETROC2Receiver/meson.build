@@ -4,7 +4,6 @@
 example_sat_files = files(
   '__main__.py',
   'ETROC2Receiver.py',
-  'command_interpret.py',
   'daq_helpers.py'
 )
 
