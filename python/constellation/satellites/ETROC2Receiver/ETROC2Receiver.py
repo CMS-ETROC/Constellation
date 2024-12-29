@@ -71,14 +71,14 @@ class ETROC2Receiver(DataReceiver):
 
     def _write_BOR(self, outfile: io.IOBase, item: CDTPMessage) -> None:
         """Write BOR to file"""
-        if item.name not in outfile.keys():
+        # if item.name not in outfile.keys():
             # grp = outfile.create_group(item.name).create_group("BOR")
             # grp.update(item.payload)
-            self.log.info(
-                "Wrote BOR packet from %s on run %s",
-                item.name,
-                self.run_identifier,
-            )
+        self.log.info(
+            "Wrote BOR packet from %s on run %s",
+            item.name,
+            self.run_identifier,
+        )
 
     def _write_data(self, outfile: io.IOBase, item: CDTPMessage) -> None:
         """
