@@ -67,6 +67,7 @@ def read_memory(ss, Cnt, Addr):
     for i in range(Cnt):
         print(hex(struct.unpack('I', ss.recv(4)[::-1])[0]))
 
+# TODO Read all the lines and once and refactor into 32 bit words (4 bytes) afterwords
 ## read_data_fifo
 # @param[in] Cnt read data counts 0-65535
 def read_data_fifo(ss, Cnt):

@@ -13,7 +13,6 @@ import os
 import pathlib
 import socket
 from .command_interpret import *
-from .daq_helpers import *
 import numpy as np
 
 from constellation.core.cmdp import MetricsType
@@ -204,6 +203,9 @@ class ETROC2Classic(DataSender):
 
     def do_reconfigure(self, partial_config: Configuration) -> str:
         config_keys = partial_config.get_keys()
+        if len(config_keys)==0:
+            self.log.info(f"No Reconfiguration of ETROC2Satellite {self.get_name()} requested in config.")
+            return f"No Reconfiguration requested in config."
         if "hostname" in config_keys:
             raise ValueError("Reconfiguring hostname is not possible")
         if "port" in config_keys:
