@@ -4,8 +4,7 @@
 example_sat_files = files(
   '__main__.py',
   'ETROC2Classic.py',
-  'command_interpret.py',
-  'daq_helpers.py'
+  'command_interpret.py'
 )
 
 py.install_sources(example_sat_files,
