@@ -103,7 +103,8 @@ class ETROC2Receiver(DataReceiver):
         else:
             raise TypeError(f"Cannot write payload of type '{type(item.payload)}'")
 
-        outfile.write("\n".join(payload.tolist()))
+        binary_text =  map(lambda x: format(int(x), '032b'), payload)
+        outfile.write("\n".join(list(binary_text)))
 
         # time to flush data to file?
         if self.flush_interval > 0 and (datetime.datetime.now() - self.last_flush).total_seconds() > self.flush_interval:
