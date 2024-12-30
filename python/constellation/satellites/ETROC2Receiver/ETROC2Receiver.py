@@ -167,7 +167,7 @@ class ETROC2Receiver(DataReceiver):
             self.last_flush = datetime.datetime.now()
 
     def _translate_and_write(self, outfile: io.IOBase, payload:  NDArray) -> None:
-        self.log.debug(f"len of payload: {len(payload)}")
+        # self.log.debug(f"len of payload: {len(payload)}")
         for line_int in payload:
             # Currently outside of an event
             if(self.translate_state[0] == False):
