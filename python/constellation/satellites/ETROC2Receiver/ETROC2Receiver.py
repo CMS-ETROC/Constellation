@@ -206,7 +206,7 @@ class ETROC2Receiver(DataReceiver):
                     if(line_int>>32-self.fixed_pattern_sizes["firmware_key"] == self.fixed_patterns["firmware_key"]):
                         self.translate_state[1] = "HEADER_2"
                         num_words = (line_int>>2) & 0x3FF
-                        self.event_stats[1] = -(40*num_words//(-32)) # div ceil -(x//(-y))
+                        self.event_stats[1] = -(40*int(num_words)//(-32)) # div ceil -(x//(-y))
                         self.event_stats[2] += 1
                         # outfile.write(f"EH {event_num} {event_type} {num_words}\n")
                         outfile.write(f"EH {(line_int>>12)&0xFFFF} {line_int & 0x3} {num_words} {self.event_stats[1]}\n")
