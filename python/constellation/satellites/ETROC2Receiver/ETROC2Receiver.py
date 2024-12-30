@@ -98,7 +98,7 @@ class ETROC2Receiver(DataReceiver):
         return "Configured ETROC2Receiver"
     
     def _reset_params(self) -> None:
-        self.info.debug("Reset Params Called.")
+        self.log.debug("Reset Params Called.")
         self.translate_int = 0
         # self.translate_list_clear()
         self.active_channels_clear()
