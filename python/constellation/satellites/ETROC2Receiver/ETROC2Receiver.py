@@ -216,6 +216,8 @@ class ETROC2Receiver(DataReceiver):
                 # Translate ETROC2 Frames after HEADER_2
                 elif(self.translate_state[1] == "HEADER_2"):                    
                     self.event_stats[2] += 1
+                    if(self.event_stats[0]==0):
+                        self.translate_int = self.translate_int & ((1<<32)-1)
                     self.translate_int = (self.translate_int << 32) + line_int
                     self.event_stats[0] = (self.event_stats[0]+1)%5
                     if(self.event_stats[0]>0):
