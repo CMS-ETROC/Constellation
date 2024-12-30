@@ -42,12 +42,15 @@ class ETROC2Receiver(DataReceiver):
 
     def do_initializing(self, config: dict[str, Any]) -> str:
         """Initialize and configure the satellite."""
-        # what pattern to use for the file names?
-        self.file_name_pattern = self.config.setdefault("_file_name_pattern", "run_{run_identifier}_{date}.nem")
         # what directory to store files in?
         self.output_path = self.config.setdefault("_output_path", "data")
         # Do you want to translate the received data and store that instead?
         self.translate = self.config.setdefault("translate", 1)
+        # what pattern to use for the file names?
+        if(self.translate):
+            self.file_name_pattern = self.config.setdefault("_file_name_pattern", "run_{run_identifier}_{date}.nem")
+        else:
+            self.file_name_pattern = self.config.setdefault("_file_name_pattern", "run_{run_identifier}_{date}.bin")
         # Do you want to skip fillers in the translated files?
         self.skip_fillers = self.config.setdefault("skip_fillers", 0)
         self._configure_monitoring(2.0)
@@ -77,8 +80,6 @@ class ETROC2Receiver(DataReceiver):
             "frame_data":    1,      # first 1 bit
         }
         self.file_counter = 0
-        # self.bitmask = ((1<<64)-1)
-        # self.translate_int = 0 & self.bitmask
         self.translate_int = np.uint64(0)
         self.active_channels = []
         self.active_channel  = -1
@@ -156,6 +157,7 @@ class ETROC2Receiver(DataReceiver):
         if(not self.translate):
             binary_text =  map(lambda x: format(int(x), '032b'), payload)
             outfile.write("\n".join(list(binary_text)))
+            # outfile.write(int(mem_data).to_bytes(4, 'little'))
         else:
             self._translate_and_write(outfile, payload)
 
@@ -208,11 +210,11 @@ class ETROC2Receiver(DataReceiver):
                 # Translate ETROC2 Frames after HEADER_2
                 elif(self.translate_state[1] == "HEADER_2"):                    
                     self.event_stats[2] += 1
-                    self.translate_int = ((self.translate_int << 32) + np.uint64(line_int) ) #& self.bitmask
+                    self.translate_int = ((self.translate_int << 32) + np.uint64(line_int) )
                     self.event_stats[0] = (self.event_stats[0]+1)%5
                     if(self.event_stats[0]>0):
                         to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]]
-                        self.translate_int = (self.translate_int & ((1<<self.buffer_shifts[self.event_stats[0]]) -1)) #& self.bitmask
+                        self.translate_int = (self.translate_int & ((1<<self.buffer_shifts[self.event_stats[0]]) -1))
                         # HEADER "H {channel} {L1Counter} {Type} {BCID}"
                         if(to_be_translated>>40-self.fixed_pattern_sizes["frame_header"] == self.fixed_patterns["frame_header"]<<2):
                             try:
@@ -265,7 +267,10 @@ class ETROC2Receiver(DataReceiver):
                 {type(exception)} {str(exception)}"
             ) from exception
         try:
-            file = open(directory / filename, "w")
+            if(self.translate):
+                file = open(directory / filename, "w")
+            else:
+                file = open(directory / filename, "wb")
         except Exception as exception:
             self.log.critical("Unable to open %s: %s", filename, str(exception))
             raise RuntimeError(
