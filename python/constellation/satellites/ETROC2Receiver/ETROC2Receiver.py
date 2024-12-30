@@ -11,8 +11,8 @@ import os
 import socket
 from .daq_helpers import *
 import numpy as np
+from numpy.typing import NDArray
 import io
-import queue
 
 from constellation.core.configuration import Configuration
 from constellation.core.monitoring import schedule_metric
@@ -46,13 +46,66 @@ class ETROC2Receiver(DataReceiver):
         self.file_name_pattern = self.config.setdefault("_file_name_pattern", "run_{run_identifier}_{date}.nem")
         # what directory to store files in?
         self.output_path = self.config.setdefault("_output_path", "data")
+        # Do you want to translate the received data and store that instead?
+        self.translate = self.config.setdefault("translate", True)
+        # Do you want to skip fillers in the translated files?
+        self.translate = self.config.setdefault("skip_fillers", False)
         self._configure_monitoring(2.0)
         # how often will the file be flushed? Negative values for 'at the end of
         # the run'
         self.flush_interval = self.config.setdefault("flush_interval", 10.0)
+        # Defaults
+        self.frame_trailers = self.config.setdefault("frame_trailers", {0:0x17f0f,1:0x17f0f,2:0x17f0f,3:0x17f0f})
+        self.fixed_patterns = {
+            "clk2_filler":   0x553,     # first 12 bits
+            "fifo_filler":   0x556,     # first 12 bits
+            "time_filler":   0x559,     # first 12 bits
+            "event_header":  0xc3a3c3a, # first 28 bits
+            "firmware_key":  0x1,       # first 4  bits
+            "event_trailer": 0xb,       # first 6  bits
+            "frame_header":  0x3c5c,    # first 16 bits + '00'
+            "frame_data":    0x1,
+        }
+        self.fixed_pattern_sizes = {
+            "clk2_filler":   12,     # first 12 bits
+            "fifo_filler":   12,     # first 12 bits
+            "time_filler":   12,     # first 12 bits
+            "event_header":  28,     # first 28 bits
+            "firmware_key":  4,      # first 4 bits
+            "event_trailer": 6,      # first 6  bits
+            "frame_header":  18,     # first 16 bits + '00'
+            "frame_trailer": 18,     # first 18 bits
+            "frame_data":    1,      # first 1 bit
+        }
         self.file_counter = 0
-        self.translate_queue = queue.Queue()
+        self.translate_int = 0
+        # self.translate_list_append = self.translate_list.append
+        # self.translate_list_pop = self.translate_list.pop
+        # self.translate_list_clear = self.translate_list.clear
+        self.active_channels = []
+        self.active_channel  = -1
+        self.active_channels_extend = self.active_channels.extend
+        self.active_channels_pop = self.active_channels.pop
+        self.active_channels_clear = self.active_channels.clear
+        self.translate_state = [False, "", ""] # [in_event, previous_state, previous_filler]
+        self.event_stats     = [-1, -1, -1]    # [40bit_state, num_32bit_words, current_word]
+        self.buffer_shifts = {
+            1:(24,0xFFFFFF),
+            2:(16,0xFFFF),
+            3:(8, 0xFF),
+            4:(0, 0x0)
+        }
         return "Configured ETROC2Receiver"
+    
+    def _reset_params(self) -> None:
+        self.translate_int = 0
+        # self.translate_list_clear()
+        self.active_channels_clear()
+        self.active_channel  = -1
+        self.translate_state[0] = False
+        self.event_stats[0] = -1
+        self.event_stats[1] = -1
+        self.event_stats[2] = -1
     
     def do_run(self, run_identifier: str) -> str:
         """Handle the data enqueued by the ZMQ Poller."""
@@ -103,13 +156,95 @@ class ETROC2Receiver(DataReceiver):
         else:
             raise TypeError(f"Cannot write payload of type '{type(item.payload)}'")
 
-        binary_text =  map(lambda x: format(int(x), '032b'), payload)
-        outfile.write("\n".join(list(binary_text)))
+        if(not self.translate):
+            binary_text =  map(lambda x: format(int(x), '032b'), payload)
+            outfile.write("\n".join(list(binary_text)))
+        else:
+            self._translate_and_write(outfile, payload)
 
         # time to flush data to file?
         if self.flush_interval > 0 and (datetime.datetime.now() - self.last_flush).total_seconds() > self.flush_interval:
             outfile.flush()
             self.last_flush = datetime.datetime.now()
+
+    def _translate_and_write(self, outfile: io.IOBase, payload:  NDArray) -> None:
+        for line_int in payload:
+            # Currently outside of an event
+            if(self.translate_state[0] == False):
+                # FIFO or fixed TIME Filler
+                if(line_int>>32-self.fixed_pattern_sizes["fifo_filler"] == self.fixed_patterns["fifo_filler"] or line_int>>32-self.fixed_pattern_sizes["time_filler"]== self.fixed_patterns["time_filler"]):
+                    binary_text = format(line_int, '032b')[self.fixed_pattern_sizes["fifo_filler"]:]
+                    filler_type = "FIFO" if (line_int>>32-self.fixed_pattern_sizes["fifo_filler"] == self.fixed_patterns["fifo_filler"]) else "CLOCK"
+                    if(self.translate_state[2] != binary_text):
+                        self.log.info(f"Link Status: {binary_text[0:4]} {binary_text[4:12]}, Reset Counter: {int(binary_text[12:],2)}")
+                        self.translate_state[2] = binary_text
+                    if(not self.skip_fillers):
+                        outfile.write(f"{filler_type} {binary_text[0:4]} {binary_text[4:12]} {int(binary_text[12:],2)}\n")
+                    self.translate_state[1] = "FILLER"
+                # CLOCK2 Filler
+                elif(line_int>>32-self.fixed_pattern_sizes["clk2_filler"] == self.fixed_patterns["clk2_filler"]):
+                    binary_text = format(line_int, '032b')[self.fixed_pattern_sizes["clk2_filler"]:]
+                    if(not self.skip_fillers):
+                        outfile.write(f"CLOCK2 {binary_text}\n")
+                    self.translate_state[1] = "FILLER"
+                # Event Header, forces transition into event state
+                elif(line_int>>32-self.fixed_pattern_sizes["event_header"] == self.fixed_patterns["event_header"]):
+                    self.translate_state[0] == True
+                    self.translate_state[1] = "HEADER_1"
+                    binary_text = format(line_int & 0xF, '04b')
+                    self.active_channels_extend([key for key,val in enumerate(binary_text[::-1]) if val=='1'][::-1])
+            # Currently inside of an event
+            else:
+                # Upon first entry, check if HEADER_2 found, else bail out
+                if(self.translate_state[1] == "HEADER_1"):
+                    if(line_int>>32-self.fixed_pattern_sizes["firmware_key"] == self.fixed_patterns["firmware_key"]):
+                        self.translate_state[1] = "HEADER_2"
+                        num_words = (line_int>>2) & 0x3FF
+                        self.event_stats[1] = -(40*num_words//(-32)) # div ceil -(x//(-y))
+                        self.event_stats[2] += 1
+                        # outfile.write(f"EH {event_num} {event_type} {num_words}\n")
+                        outfile.write(f"EH {(line_int>>12)&0xFFFF} {line_int & 0x3} {num_words}\n")
+                    else:
+                        self._reset_params()
+                        outfile.write(f"BROKEN EVENT HEADER!\n")
+                # Translate ETROC2 Frames after HEADER_2
+                elif(self.translate_state[1] == "HEADER_2"):                    
+                    self.event_stats[2] += 1
+                    self.translate_int = (self.translate_int << 32) + line_int
+                    self.event_stats[0] = (self.event_stats[0]+1)%5
+                    if(self.event_stats[0]>0):
+                        to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]][0]
+                        self.translate_int = self.translate_int & self.buffer_shifts[self.event_stats[0]][1]
+                        # HEADER "H {channel} {L1Counter} {Type} {BCID}"
+                        if(to_be_translated>>40-self.fixed_pattern_sizes["frame_header"] == self.fixed_patterns["frame_header"]<<2):
+                            try:
+                                self.active_channel=self.active_channels_pop()
+                            except IndexError:
+                                self.active_channel=-1
+                            outfile.write(f"H {self.active_channel} {(to_be_translated>>14) & 0xFF} {(to_be_translated>>12) & 0x3} {to_be_translated & 0xFFF}\n")
+                        # DATA "D {channel} {EA} {ROW} {COL} {TOA} {TOT} {CAL}"
+                        elif(to_be_translated>>40-self.fixed_pattern_sizes["frame_data"] == self.fixed_patterns["frame_data"]):
+                            outfile.write(f"D {self.active_channel} {(to_be_translated >> 37) & 0x3} {(to_be_translated >> 29) & 0xF} {(to_be_translated >> 33) & 0xF} {(to_be_translated >> 19) & 0x3FF} {(to_be_translated >> 10) & 0x1FF} {to_be_translated & 0x3FF}\n")
+                        # TRAILER "T {channel} {Status} {Hits} {CRC}"
+                        elif(to_be_translated>>40-self.fixed_pattern_sizes["frame_trailer"] == self.frame_trailers[self.active_channel]):
+                            outfile.write(f"T {self.active_channel} {(to_be_translated >> 16) & 0x3F} {(to_be_translated >> 8) & 0xFF} {to_be_translated & 0xFF}\n")
+                        else:
+                            outfile.write(f"UNKNOWN 40 bit word!\n")
+                    if(self.event_stats[2] == self.event_stats[1]):
+                        self.translate_state[1] = "ETROC2"
+                # Translate Event Trailer after ETROC2 Frames
+                elif(self.translate_state[1] == "ETROC2"):
+                    if(line_int>>32-self.fixed_pattern_sizes["event_trailer"] == self.fixed_patterns["event_trailer"]):
+                        self.translate_state[1] = "TRAILER"
+                        # outfile.write(f"ET {num_hits} {overflow_count} {hamming_count} {crc}\n")
+                        outfile.write(f"ET {(line_int >> 14) & 0xFFF} {(line_int >> 11) & 0x7} {(line_int >> 8) & 0x7} {line_int & 0xFF}\n")
+                    else:
+                        outfile.write(f"BROKEN EVENT NO EVENT TRAILER FOUND!\n")
+                    self._reset_params()
+                else:
+                    self._reset_params()
+                    outfile.write(f"BROKEN EVENT... How did we get here?...\n")
+
 
     def _open_file(self, filename: pathlib.Path) -> io.IOBase:
         """Open the nem file and return the file object."""
