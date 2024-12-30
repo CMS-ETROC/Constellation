@@ -49,7 +49,7 @@ class ETROC2Receiver(DataReceiver):
         # Do you want to translate the received data and store that instead?
         self.translate = self.config.setdefault("translate", True)
         # Do you want to skip fillers in the translated files?
-        self.translate = self.config.setdefault("skip_fillers", False)
+        self.skip_fillers = self.config.setdefault("skip_fillers", False)
         self._configure_monitoring(2.0)
         # how often will the file be flushed? Negative values for 'at the end of
         # the run'
