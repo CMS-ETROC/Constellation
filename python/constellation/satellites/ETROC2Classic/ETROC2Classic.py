@@ -303,7 +303,7 @@ class ETROC2Classic(DataSender):
                 continue
             # Include data type as part of meta
             meta = {
-                "dtype": f"{mem_data.dtype}",
+                "dtype": f'''{np.dtype('S4')}''',
             }
             # Format payload to serializable
             self.data_queue.put((mem_data.tobytes(), meta))
