@@ -51,8 +51,7 @@ class ETROC2Receiver(DataReceiver):
         # Do you want to skip fillers in the translated files?
         self.skip_fillers = self.config.setdefault("skip_fillers", 0)
         self._configure_monitoring(2.0)
-        # how often will the file be flushed? Negative values for 'at the end of
-        # the run'
+        # how often will the file be flushed? Negative values for 'at the end of the run'
         self.flush_interval = self.config.setdefault("flush_interval", 10.0)
         # Defaults
         self.frame_trailers = self.config.setdefault("frame_trailers", {0:0x17f0f,1:0x17f0f,2:0x17f0f,3:0x17f0f})
@@ -80,9 +79,6 @@ class ETROC2Receiver(DataReceiver):
         self.file_counter = 0
         self.bitmask = ((1<<64)-1)
         self.translate_int = 0 & self.bitmask
-        # self.translate_list_append = self.translate_list.append
-        # self.translate_list_pop = self.translate_list.pop
-        # self.translate_list_clear = self.translate_list.clear
         self.active_channels = []
         self.active_channel  = -1
         self.active_channels_extend = self.active_channels.extend
@@ -144,7 +140,7 @@ class ETROC2Receiver(DataReceiver):
             )
 
         # title = f"data_{self.run_identifier}_{item.sequence_number:09}"
-        # self.log.info(title)
+
         if isinstance(item.payload, bytes):
             # interpret bytes as array of uint8 if nothing else was specified in the meta
             payload = np.frombuffer(item.payload, dtype=item.meta.get("dtype", np.uint8))
@@ -168,7 +164,6 @@ class ETROC2Receiver(DataReceiver):
             self.last_flush = datetime.datetime.now()
 
     def _translate_and_write(self, outfile: io.IOBase, payload:  NDArray) -> None:
-        # self.log.debug(f"len of payload: {len(payload)}")
         for line_int in payload:
             # Currently outside of an event
             if(self.translate_state[0] == False):
@@ -190,20 +185,15 @@ class ETROC2Receiver(DataReceiver):
                     self.translate_state[1] = "FILLER"
                 # Event Header, forces transition into event state
                 elif(line_int>>32-self.fixed_pattern_sizes["event_header"] == self.fixed_patterns["event_header"]):
-                    self._reset_params()
+                    # self._reset_params()
                     self.translate_state[0] = True
                     self.translate_state[1] = "HEADER_1"
                     binary_text = format(line_int & 0xF, '04b')
-                    # self.active_channels_clear()
                     self.active_channels_extend([key for key,val in enumerate(binary_text[::-1]) if val=='1'][::-1])
-                    # outfile.write(f"EH 1 {self.active_channels} {self.translate_state[0]}\n")
-                # continue
             # Currently inside of an event
             else:
-                # outfile.write(f"inEvent {format(line_int, '032b')}\n")
                 # Upon first entry, check if HEADER_2 found, else bail out
                 if(self.translate_state[1] == "HEADER_1"):
-                    # outfile.write(f"EH 2 {format(line_int, '032b')}\n")
                     if(line_int>>32-self.fixed_pattern_sizes["firmware_key"] == self.fixed_patterns["firmware_key"]):
                         self.translate_state[1] = "HEADER_2"
                         num_words = (line_int>>2) & 0x3FF
@@ -217,18 +207,11 @@ class ETROC2Receiver(DataReceiver):
                 # Translate ETROC2 Frames after HEADER_2
                 elif(self.translate_state[1] == "HEADER_2"):                    
                     self.event_stats[2] += 1
-                    if(self.event_stats[0]==0):
-                        self.translate_int = self.translate_int & self.bitmask
-                        outfile.write(f"DEBUG {format(self.translate_int, '032b')} {format(line_int, '032b')} {self.event_stats[0]} {self.event_stats[2]}\n")
                     self.translate_int = ((self.translate_int << 32) + np.uint64(line_int) ) & self.bitmask
                     self.event_stats[0] = (self.event_stats[0]+1)%5
-                    if(self.event_stats[0]==1):
-                        outfile.write(f"DEBUG {format(self.translate_int, '064b')} {self.event_stats[0]} {self.event_stats[2]}\n")
                     if(self.event_stats[0]>0):
                         to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]]
                         self.translate_int = (self.translate_int & ((1<<self.buffer_shifts[self.event_stats[0]]) -1)) & self.bitmask
-                        outfile.write(f"DEBUG {format(to_be_translated, '040b')} {format(self.translate_int, '024b')} {self.event_stats[0]} {self.event_stats[2]}\n")
-                        # if(self.translate_int == 0): self.translate_int = 0
                         # HEADER "H {channel} {L1Counter} {Type} {BCID}"
                         if(to_be_translated>>40-self.fixed_pattern_sizes["frame_header"] == self.fixed_patterns["frame_header"]<<2):
                             try:
@@ -244,8 +227,6 @@ class ETROC2Receiver(DataReceiver):
                             outfile.write(f"T {self.active_channel} {(to_be_translated >> 16) & 0x3F} {(to_be_translated >> 8) & 0xFF} {to_be_translated & 0xFF}\n")
                         else:
                             outfile.write(f"UNKNOWN 40 bit word!\n")
-                    if(self.event_stats[0]==0):
-                        pass
                     if(self.event_stats[2] == self.event_stats[1]):
                         self.translate_state[1] = "ETROC2"
                 # Translate Event Trailer after ETROC2 Frames
