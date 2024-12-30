@@ -168,6 +168,7 @@ class ETROC2Receiver(DataReceiver):
             self.last_flush = datetime.datetime.now()
 
     def _translate_and_write(self, outfile: io.IOBase, payload:  NDArray) -> None:
+        self.log.debug(f"len of payload: {len(payload)}")
         for line_int in payload:
             # Currently outside of an event
             if(self.translate_state[0] == False):
@@ -200,6 +201,7 @@ class ETROC2Receiver(DataReceiver):
             else:
                 # Upon first entry, check if HEADER_2 found, else bail out
                 if(self.translate_state[1] == "HEADER_1"):
+                    outfile.write(f"EH 2 {format(line_int, '032b')}\n")
                     if(line_int>>32-self.fixed_pattern_sizes["firmware_key"] == self.fixed_patterns["firmware_key"]):
                         self.translate_state[1] = "HEADER_2"
                         num_words = (line_int>>2) & 0x3FF
