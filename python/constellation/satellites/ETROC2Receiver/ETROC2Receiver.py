@@ -78,7 +78,8 @@ class ETROC2Receiver(DataReceiver):
             "frame_data":    1,      # first 1 bit
         }
         self.file_counter = 0
-        self.translate_int = 0
+        self.bitmask = ((1<<64)-1)
+        self.translate_int = 0 & self.bitmask
         # self.translate_list_append = self.translate_list.append
         # self.translate_list_pop = self.translate_list.pop
         # self.translate_list_clear = self.translate_list.clear
@@ -98,7 +99,7 @@ class ETROC2Receiver(DataReceiver):
         return "Configured ETROC2Receiver"
     
     def _reset_params(self) -> None:
-        self.translate_int = 0
+        self.translate_int = 0 & self.bitmask
         self.active_channels_clear()
         self.active_channel  = -1
         self.translate_state[0] = False
@@ -217,15 +218,15 @@ class ETROC2Receiver(DataReceiver):
                 elif(self.translate_state[1] == "HEADER_2"):                    
                     self.event_stats[2] += 1
                     if(self.event_stats[0]==0):
-                        self.translate_int = self.translate_int & ((1<<32)-1)
-                        outfile.write(f"DEBUG {format(self.translate_int, '036b')} {format(line_int, '036b')} {self.event_stats[0]} {self.event_stats[2]}\n")
-                    self.translate_int = (self.translate_int << 32) + line_int
+                        self.translate_int = self.translate_int & self.bitmask
+                        outfile.write(f"DEBUG {format(self.translate_int, '032b')} {format(line_int, '032b')} {self.event_stats[0]} {self.event_stats[2]}\n")
+                    self.translate_int = ((self.translate_int << 32) + line_int ) & self.bitmask
                     self.event_stats[0] = (self.event_stats[0]+1)%5
                     if(self.event_stats[0]==1):
-                        outfile.write(f"DEBUG {format(self.translate_int, '072b')} {self.event_stats[0]} {self.event_stats[2]}\n")
+                        outfile.write(f"DEBUG {format(self.translate_int, '064b')} {self.event_stats[0]} {self.event_stats[2]}\n")
                     if(self.event_stats[0]>0):
                         to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]]
-                        self.translate_int = self.translate_int & ((1<<self.buffer_shifts[self.event_stats[0]]) -1)
+                        self.translate_int = (self.translate_int & ((1<<self.buffer_shifts[self.event_stats[0]]) -1)) & self.bitmask
                         outfile.write(f"DEBUG {format(to_be_translated, '040b')} {format(self.translate_int, '024b')} {self.event_stats[0]} {self.event_stats[2]}\n")
                         # if(self.translate_int == 0): self.translate_int = 0
                         # HEADER "H {channel} {L1Counter} {Type} {BCID}"
