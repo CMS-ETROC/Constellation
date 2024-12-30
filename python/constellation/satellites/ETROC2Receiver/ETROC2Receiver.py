@@ -13,6 +13,7 @@ from .daq_helpers import *
 import numpy as np
 from numpy.typing import NDArray
 import io
+import struct
 
 from constellation.core.configuration import Configuration
 from constellation.core.monitoring import schedule_metric
@@ -46,6 +47,7 @@ class ETROC2Receiver(DataReceiver):
         self.output_path = self.config.setdefault("_output_path", "data")
         # Do you want to translate the received data and store that instead?
         self.translate = self.config.setdefault("translate", 1)
+        self.compressed_binary = self.config.setdefault("compressed_binary", 1)
         # what pattern to use for the file names?
         if(self.translate):
             self.file_name_pattern = self.config.setdefault("_file_name_pattern", "run_{run_identifier}_{date}.nem")
@@ -155,9 +157,11 @@ class ETROC2Receiver(DataReceiver):
             raise TypeError(f"Cannot write payload of type '{type(item.payload)}'")
 
         if(not self.translate):
-            binary_text =  map(lambda x: format(int(x), '032b'), payload)
-            outfile.write("\n".join(list(binary_text)))
-            # outfile.write(int(mem_data).to_bytes(4, 'little'))
+            if(self.compressed_binary):
+                outfile.write(b''.join(payload))
+            else:
+                binary_text =  map(lambda x: format(struct.unpack("I",x)[0], '032b'), payload)
+                outfile.write("\n".join(list(binary_text)))
         else:
             self._translate_and_write(outfile, payload)
 
@@ -168,6 +172,7 @@ class ETROC2Receiver(DataReceiver):
 
     def _translate_and_write(self, outfile: io.IOBase, payload:  NDArray) -> None:
         for line_int in payload:
+            line_int = struct.unpack("I",line_int)[0]
             # Currently outside of an event
             if(self.translate_state[0] == False):
                 # FIFO or fixed TIME Filler
@@ -267,7 +272,7 @@ class ETROC2Receiver(DataReceiver):
                 {type(exception)} {str(exception)}"
             ) from exception
         try:
-            if(self.translate):
+            if(self.translate or (not self.compressed_binary)):
                 file = open(directory / filename, "w")
             else:
                 file = open(directory / filename, "wb")
