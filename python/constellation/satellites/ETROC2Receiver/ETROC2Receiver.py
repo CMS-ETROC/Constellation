@@ -189,10 +189,11 @@ class ETROC2Receiver(DataReceiver):
                     self.translate_state[1] = "FILLER"
                 # Event Header, forces transition into event state
                 elif(line_int>>32-self.fixed_pattern_sizes["event_header"] == self.fixed_patterns["event_header"]):
+                    self._reset_params()
                     self.translate_state[0] == True
                     self.translate_state[1] = "HEADER_1"
                     binary_text = format(line_int & 0xF, '04b')
-                    self.active_channels_clear()
+                    # self.active_channels_clear()
                     self.active_channels_extend([key for key,val in enumerate(binary_text[::-1]) if val=='1'][::-1])
                     outfile.write(f"EH 1 {self.active_channels}\n")
             # Currently inside of an event
