@@ -98,9 +98,7 @@ class ETROC2Receiver(DataReceiver):
         return "Configured ETROC2Receiver"
     
     def _reset_params(self) -> None:
-        self.log.debug("Reset Params Called.")
         self.translate_int = 0
-        # self.translate_list_clear()
         self.active_channels_clear()
         self.active_channel  = -1
         self.translate_state[0] = False
@@ -192,7 +190,7 @@ class ETROC2Receiver(DataReceiver):
                 # Event Header, forces transition into event state
                 elif(line_int>>32-self.fixed_pattern_sizes["event_header"] == self.fixed_patterns["event_header"]):
                     self._reset_params()
-                    self.translate_state[0] == True
+                    self.translate_state[0] = True
                     self.translate_state[1] = "HEADER_1"
                     binary_text = format(line_int & 0xF, '04b')
                     # self.active_channels_clear()
@@ -201,10 +199,10 @@ class ETROC2Receiver(DataReceiver):
                 continue
             # Currently inside of an event
             else:
-                outfile.write(f"inEvent {format(line_int, '032b')}\n")
+                # outfile.write(f"inEvent {format(line_int, '032b')}\n")
                 # Upon first entry, check if HEADER_2 found, else bail out
                 if(self.translate_state[1] == "HEADER_1"):
-                    outfile.write(f"EH 2 {format(line_int, '032b')}\n")
+                    # outfile.write(f"EH 2 {format(line_int, '032b')}\n")
                     if(line_int>>32-self.fixed_pattern_sizes["firmware_key"] == self.fixed_patterns["firmware_key"]):
                         self.translate_state[1] = "HEADER_2"
                         num_words = (line_int>>2) & 0x3FF
