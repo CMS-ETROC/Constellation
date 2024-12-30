@@ -158,10 +158,13 @@ class ETROC2Receiver(DataReceiver):
 
         if(not self.translate):
             if(self.compressed_binary):
-                outfile.write(b''.join(payload))
+                binary_text =  map(lambda x: int(x).to_bytes(4, 'little'), payload)
+                for x in list(binary_text):
+                    outfile.write(x)
             else:
-                binary_text =  map(lambda x: format(struct.unpack("I",x)[0], '032b'), payload)
-                outfile.write("\n".join(list(binary_text)))
+                # binary_text =  map(lambda x: format(int(x), '032b'), payload)
+                # outfile.write("\n".join(list(binary_text)))
+                outfile.write("\n".join(format(int(x), '032b') for x in payload))
         else:
             self._translate_and_write(outfile, payload)
 
@@ -171,9 +174,9 @@ class ETROC2Receiver(DataReceiver):
             self.last_flush = datetime.datetime.now()
 
     def _translate_and_write(self, outfile: io.IOBase, payload:  NDArray) -> None:
-        for line_bin in payload:
+        for line_int in payload:
             # self.log.debug(f"{line_bin}")
-            line_int = np.uint64(struct.unpack("I",line_bin)[0])
+            # line_int = np.uint64(struct.unpack("I",line_bin)[0])
             # Currently outside of an event
             if(self.translate_state[0] == False):
                 # FIFO or fixed TIME Filler
@@ -206,7 +209,8 @@ class ETROC2Receiver(DataReceiver):
                     if(line_int>>32-self.fixed_pattern_sizes["firmware_key"] == self.fixed_patterns["firmware_key"]):
                         self.translate_state[1] = "HEADER_2"
                         num_words = (line_int>>2) & 0x3FF
-                        self.event_stats[1] = -(40*int(num_words)//(-32)) # div ceil -(x//(-y))
+                        # self.event_stats[1] = -(40*int(num_words)//(-32)) # div ceil -(x//(-y))
+                        self.event_stats[1] = -(40*num_words//(-32)) # div ceil -(x//(-y))
                         self.event_stats[2] += 1
                         # outfile.write(f"EH {event_num} {event_type} {num_words}\n")
                         outfile.write(f"EH {(line_int>>12)&0xFFFF} {line_int & 0x3} {num_words} {self.event_stats[1]}\n")
