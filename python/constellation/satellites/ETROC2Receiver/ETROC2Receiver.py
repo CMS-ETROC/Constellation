@@ -195,8 +195,8 @@ class ETROC2Receiver(DataReceiver):
                     binary_text = format(line_int & 0xF, '04b')
                     # self.active_channels_clear()
                     self.active_channels_extend([key for key,val in enumerate(binary_text[::-1]) if val=='1'][::-1])
-                    outfile.write(f"EH 1 {self.active_channels} {self.translate_state[0]}\n")
-                continue
+                    # outfile.write(f"EH 1 {self.active_channels} {self.translate_state[0]}\n")
+                # continue
             # Currently inside of an event
             else:
                 # outfile.write(f"inEvent {format(line_int, '032b')}\n")
@@ -209,7 +209,7 @@ class ETROC2Receiver(DataReceiver):
                         self.event_stats[1] = -(40*num_words//(-32)) # div ceil -(x//(-y))
                         self.event_stats[2] += 1
                         # outfile.write(f"EH {event_num} {event_type} {num_words}\n")
-                        outfile.write(f"EH {(line_int>>12)&0xFFFF} {line_int & 0x3} {num_words}\n")
+                        outfile.write(f"EH {(line_int>>12)&0xFFFF} {line_int & 0x3} {num_words} {self.event_stats[1]}\n")
                     else:
                         self._reset_params()
                         outfile.write(f"BROKEN EVENT HEADER!\n")
@@ -218,6 +218,7 @@ class ETROC2Receiver(DataReceiver):
                     self.event_stats[2] += 1
                     self.translate_int = (self.translate_int << 32) + line_int
                     self.event_stats[0] = (self.event_stats[0]+1)%5
+                    outfile.write(f"DEBUG {format(self.translate_int, '064b')} {self.event_stats[0]} {self.event_stats[2]}\n")
                     if(self.event_stats[0]>0):
                         to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]][0]
                         self.translate_int = self.translate_int & self.buffer_shifts[self.event_stats[0]][1]
