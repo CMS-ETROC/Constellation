@@ -142,8 +142,8 @@ class ETROC2Receiver(DataReceiver):
                 item.name,
             )
 
-        title = f"data_{self.run_identifier}_{item.sequence_number:09}"
-        self.log.info(title)
+        # title = f"data_{self.run_identifier}_{item.sequence_number:09}"
+        # self.log.info(title)
         if isinstance(item.payload, bytes):
             # interpret bytes as array of uint8 if nothing else was specified in the meta
             payload = np.frombuffer(item.payload, dtype=item.meta.get("dtype", np.uint8))
@@ -221,7 +221,7 @@ class ETROC2Receiver(DataReceiver):
                     if(self.event_stats[0]>0):
                         to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]]
                         self.translate_int = self.translate_int & ((1<<self.buffer_shifts[self.event_stats[0]]) -1)
-                        outfile.write(f"DEBUG {format(to_be_translated, '040b')} {format(to_be_translated, '024b')} {self.event_stats[0]} {self.event_stats[2]}\n")
+                        outfile.write(f"DEBUG {format(to_be_translated, '040b')} {format(self.translate_int, '024b')} {self.event_stats[0]} {self.event_stats[2]}\n")
                         # if(self.translate_int == 0): self.translate_int = 0
                         # HEADER "H {channel} {L1Counter} {Type} {BCID}"
                         if(to_be_translated>>40-self.fixed_pattern_sizes["frame_header"] == self.fixed_patterns["frame_header"]<<2):
