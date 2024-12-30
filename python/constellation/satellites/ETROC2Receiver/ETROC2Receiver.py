@@ -93,7 +93,7 @@ class ETROC2Receiver(DataReceiver):
             1:(24,0xFFFFFF),
             2:(16,0xFFFF),
             3:(8, 0xFF),
-            4:(0, 0x0)
+            4:(0, 0)
         }
         return "Configured ETROC2Receiver"
     
@@ -222,7 +222,7 @@ class ETROC2Receiver(DataReceiver):
                     if(self.event_stats[0]>0):
                         to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]][0]
                         self.translate_int = self.translate_int & self.buffer_shifts[self.event_stats[0]][1]
-                        if(self.translate_int == 0): self.translate_int = 0
+                        # if(self.translate_int == 0): self.translate_int = 0
                         # HEADER "H {channel} {L1Counter} {Type} {BCID}"
                         if(to_be_translated>>40-self.fixed_pattern_sizes["frame_header"] == self.fixed_patterns["frame_header"]<<2):
                             try:
