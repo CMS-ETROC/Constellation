@@ -158,9 +158,10 @@ class ETROC2Receiver(DataReceiver):
 
         if(not self.translate):
             if(self.compressed_binary):
-                binary_text =  map(lambda x: int(x).to_bytes(4, 'little'), payload)
-                for x in list(binary_text):
-                    outfile.write(x)
+                # binary_text =  map(lambda x: int(x).to_bytes(4, 'little'), payload)
+                # for x in list(binary_text):
+                #     outfile.write(x)
+                outfile.write(b''.join(int(x).to_bytes(4, 'little') for x in payload))
             else:
                 # binary_text =  map(lambda x: format(int(x), '032b'), payload)
                 # outfile.write("\n".join(list(binary_text)))
