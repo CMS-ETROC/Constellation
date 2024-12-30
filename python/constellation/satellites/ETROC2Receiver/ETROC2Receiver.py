@@ -171,8 +171,9 @@ class ETROC2Receiver(DataReceiver):
             self.last_flush = datetime.datetime.now()
 
     def _translate_and_write(self, outfile: io.IOBase, payload:  NDArray) -> None:
-        for line_int in payload:
-            line_int = struct.unpack("I",line_int)[0]
+        for line_bin in payload:
+            self.log.debug(f"{line_bin}")
+            line_int = np.uint64(struct.unpack("I",line_bin)[0])
             # Currently outside of an event
             if(self.translate_state[0] == False):
                 # FIFO or fixed TIME Filler
