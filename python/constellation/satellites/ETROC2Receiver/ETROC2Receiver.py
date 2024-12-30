@@ -47,9 +47,9 @@ class ETROC2Receiver(DataReceiver):
         # what directory to store files in?
         self.output_path = self.config.setdefault("_output_path", "data")
         # Do you want to translate the received data and store that instead?
-        self.translate = self.config.setdefault("translate", True)
+        self.translate = self.config.setdefault("translate", 1)
         # Do you want to skip fillers in the translated files?
-        self.skip_fillers = self.config.setdefault("skip_fillers", False)
+        self.skip_fillers = self.config.setdefault("skip_fillers", 0)
         self._configure_monitoring(2.0)
         # how often will the file be flushed? Negative values for 'at the end of
         # the run'
@@ -222,6 +222,7 @@ class ETROC2Receiver(DataReceiver):
                     if(self.event_stats[0]>0):
                         to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]][0]
                         self.translate_int = self.translate_int & self.buffer_shifts[self.event_stats[0]][1]
+                        if(self.translate_int == 0): self.translate_int = 0
                         # HEADER "H {channel} {L1Counter} {Type} {BCID}"
                         if(to_be_translated>>40-self.fixed_pattern_sizes["frame_header"] == self.fixed_patterns["frame_header"]<<2):
                             try:
