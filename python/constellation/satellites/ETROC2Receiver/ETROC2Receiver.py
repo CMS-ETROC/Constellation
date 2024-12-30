@@ -90,10 +90,10 @@ class ETROC2Receiver(DataReceiver):
         self.translate_state = [False, "", ""] # [in_event, previous_state, previous_filler]
         self.event_stats     = [-1, -1, -1]    # [40bit_state, num_32bit_words, current_word]
         self.buffer_shifts = {
-            1:(24,0xFFFFFF),
-            2:(16,0xFFFF),
-            3:(8, 0xFF),
-            4:(0, 0)
+            1:24,
+            2:16,
+            3:8,
+            4:0
         }
         return "Configured ETROC2Receiver"
     
@@ -218,10 +218,10 @@ class ETROC2Receiver(DataReceiver):
                     self.event_stats[2] += 1
                     self.translate_int = (self.translate_int << 32) + line_int
                     self.event_stats[0] = (self.event_stats[0]+1)%5
-                    outfile.write(f"DEBUG {format(self.translate_int, '064b')} {self.event_stats[0]} {self.event_stats[2]}\n")
                     if(self.event_stats[0]>0):
-                        to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]][0]
-                        self.translate_int = self.translate_int & self.buffer_shifts[self.event_stats[0]][1]
+                        to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]]
+                        self.translate_int = self.translate_int & ((1<<self.buffer_shifts[self.event_stats[0]]) -1)
+                        outfile.write(f"DEBUG {format(to_be_translated, '040b')} {format(to_be_translated, '024b')} {self.event_stats[0]} {self.event_stats[2]}\n")
                         # if(self.translate_int == 0): self.translate_int = 0
                         # HEADER "H {channel} {L1Counter} {Type} {BCID}"
                         if(to_be_translated>>40-self.fixed_pattern_sizes["frame_header"] == self.fixed_patterns["frame_header"]<<2):
