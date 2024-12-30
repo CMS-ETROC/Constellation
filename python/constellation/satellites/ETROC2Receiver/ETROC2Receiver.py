@@ -220,7 +220,7 @@ class ETROC2Receiver(DataReceiver):
                     if(self.event_stats[0]==0):
                         self.translate_int = self.translate_int & self.bitmask
                         outfile.write(f"DEBUG {format(self.translate_int, '032b')} {format(line_int, '032b')} {self.event_stats[0]} {self.event_stats[2]}\n")
-                    self.translate_int = ((self.translate_int << 32) + line_int ) & self.bitmask
+                    self.translate_int = ((self.translate_int << 32) + np.uint64(line_int) ) & self.bitmask
                     self.event_stats[0] = (self.event_stats[0]+1)%5
                     if(self.event_stats[0]==1):
                         outfile.write(f"DEBUG {format(self.translate_int, '064b')} {self.event_stats[0]} {self.event_stats[2]}\n")
