@@ -197,6 +197,7 @@ class ETROC2Receiver(DataReceiver):
                     # self.active_channels_clear()
                     self.active_channels_extend([key for key,val in enumerate(binary_text[::-1]) if val=='1'][::-1])
                     outfile.write(f"EH 1 {self.active_channels}\n")
+                continue
             # Currently inside of an event
             else:
                 # Upon first entry, check if HEADER_2 found, else bail out
