@@ -77,8 +77,9 @@ class ETROC2Receiver(DataReceiver):
             "frame_data":    1,      # first 1 bit
         }
         self.file_counter = 0
-        self.bitmask = ((1<<64)-1)
-        self.translate_int = 0 & self.bitmask
+        # self.bitmask = ((1<<64)-1)
+        # self.translate_int = 0 & self.bitmask
+        self.translate_int = np.uint64(0)
         self.active_channels = []
         self.active_channel  = -1
         self.active_channels_extend = self.active_channels.extend
@@ -95,7 +96,7 @@ class ETROC2Receiver(DataReceiver):
         return "Configured ETROC2Receiver"
     
     def _reset_params(self) -> None:
-        self.translate_int = 0 & self.bitmask
+        self.translate_int = np.uint64(0)
         self.active_channels_clear()
         self.active_channel  = -1
         self.translate_state[0] = False
@@ -207,11 +208,11 @@ class ETROC2Receiver(DataReceiver):
                 # Translate ETROC2 Frames after HEADER_2
                 elif(self.translate_state[1] == "HEADER_2"):                    
                     self.event_stats[2] += 1
-                    self.translate_int = ((self.translate_int << 32) + np.uint64(line_int) ) & self.bitmask
+                    self.translate_int = ((self.translate_int << 32) + np.uint64(line_int) ) #& self.bitmask
                     self.event_stats[0] = (self.event_stats[0]+1)%5
                     if(self.event_stats[0]>0):
                         to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]]
-                        self.translate_int = (self.translate_int & ((1<<self.buffer_shifts[self.event_stats[0]]) -1)) & self.bitmask
+                        self.translate_int = (self.translate_int & ((1<<self.buffer_shifts[self.event_stats[0]]) -1)) #& self.bitmask
                         # HEADER "H {channel} {L1Counter} {Type} {BCID}"
                         if(to_be_translated>>40-self.fixed_pattern_sizes["frame_header"] == self.fixed_patterns["frame_header"]<<2):
                             try:
