@@ -78,7 +78,9 @@ def read_data_fifo(ss, Cnt):
     max_allowed_fails = 15
     for i in range(Cnt):
         try:
-            mem_data += [struct.unpack('I', ss.recv(4)[::-1])[0]]
+            temp = ss.recv(4)[::-1]
+            print(temp)
+            mem_data += [struct.unpack('I', temp)[0]]
         except struct.error:
             fail_counter = fail_counter + 1
             RuntimeWarning(f"Not enough data in buffer to unpack... This is fail #{fail_counter}/{max_allowed_fails} allowed")
