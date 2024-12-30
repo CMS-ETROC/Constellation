@@ -159,8 +159,8 @@ class ETROC2Classic(DataSender):
         self.counter_duration = config.setdefault("counter_duration", 0x0000)
         self.triggerbit_delay = config.setdefault("triggerbit_delay", 0x1800)
         self.num_fifo_read = config.setdefault("num_fifo_read", 65536)
-        self.clear_fifo = config.setdefault("clear_fifo", True) 
-        self.reset_counter = config.setdefault("reset_counter", True) 
+        self.clear_fifo = config.setdefault("clear_fifo", 1) 
+        self.reset_counter = config.setdefault("reset_counter", 1) 
         self.fast_command_memo = config.setdefault("fast_command_memo", "Start Triggerbit") 
         self.connection_socket = None
         # TODO check for valid entries for all config keys
