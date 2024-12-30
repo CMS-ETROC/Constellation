@@ -218,8 +218,11 @@ class ETROC2Receiver(DataReceiver):
                     self.event_stats[2] += 1
                     if(self.event_stats[0]==0):
                         self.translate_int = self.translate_int & ((1<<32)-1)
+                        outfile.write(f"DEBUG {format(self.translate_int, '032b')} {format(line_int, '032b')} {self.event_stats[0]} {self.event_stats[2]}\n")
                     self.translate_int = (self.translate_int << 32) + line_int
                     self.event_stats[0] = (self.event_stats[0]+1)%5
+                    if(self.event_stats[0]==1):
+                        outfile.write(f"DEBUG {format(self.translate_int, '064b')} {self.event_stats[0]} {self.event_stats[2]}\n")
                     if(self.event_stats[0]>0):
                         to_be_translated = self.translate_int >> self.buffer_shifts[self.event_stats[0]]
                         self.translate_int = self.translate_int & ((1<<self.buffer_shifts[self.event_stats[0]]) -1)
@@ -240,6 +243,8 @@ class ETROC2Receiver(DataReceiver):
                             outfile.write(f"T {self.active_channel} {(to_be_translated >> 16) & 0x3F} {(to_be_translated >> 8) & 0xFF} {to_be_translated & 0xFF}\n")
                         else:
                             outfile.write(f"UNKNOWN 40 bit word!\n")
+                    if(self.event_stats[0]==0):
+                        pass
                     if(self.event_stats[2] == self.event_stats[1]):
                         self.translate_state[1] = "ETROC2"
                 # Translate Event Trailer after ETROC2 Frames
