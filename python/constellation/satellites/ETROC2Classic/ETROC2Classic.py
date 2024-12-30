@@ -301,7 +301,6 @@ class ETROC2Classic(DataSender):
                 self.log.debug("No data in buffer! Will try to read again")
                 time.sleep(1.01)
                 continue
-            self.log.debug(f"Top of the data block: {mem_data[0]}")
             # Include data type as part of meta
             meta = {
                 "dtype": f"{mem_data.dtype}",
