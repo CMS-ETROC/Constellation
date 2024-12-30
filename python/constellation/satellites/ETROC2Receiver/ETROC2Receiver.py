@@ -98,6 +98,7 @@ class ETROC2Receiver(DataReceiver):
         return "Configured ETROC2Receiver"
     
     def _reset_params(self) -> None:
+        self.info.debug("Reset Params Called.")
         self.translate_int = 0
         # self.translate_list_clear()
         self.active_channels_clear()
@@ -196,10 +197,11 @@ class ETROC2Receiver(DataReceiver):
                     binary_text = format(line_int & 0xF, '04b')
                     # self.active_channels_clear()
                     self.active_channels_extend([key for key,val in enumerate(binary_text[::-1]) if val=='1'][::-1])
-                    outfile.write(f"EH 1 {self.active_channels}\n")
+                    outfile.write(f"EH 1 {self.active_channels} {self.translate_state[0]}\n")
                 continue
             # Currently inside of an event
             else:
+                outfile.write(f"inEvent {format(line_int, '032b')}\n")
                 # Upon first entry, check if HEADER_2 found, else bail out
                 if(self.translate_state[1] == "HEADER_1"):
                     outfile.write(f"EH 2 {format(line_int, '032b')}\n")
