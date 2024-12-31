@@ -368,14 +368,14 @@ class ETROC2Receiver(DataReceiver):
             self.log.critical("file already exists: %s", filename)
             raise RuntimeError(f"file already exists: {filename}")
 
-        self.log.info("Creating files...")
+        self.log.info(f"Creating files in {self.output_path}...")
         self.log.debug("Creating file %s", filename)
         # Create directory path.
         directory = pathlib.Path(self.output_path)  # os.path.dirname(filename)
         try:
             os.makedirs(directory)
         except (FileExistsError, FileNotFoundError):
-            self.log.info("Directory %s already exists", directory)
+            self.log.debug("Directory %s already exists", directory)
             pass
         except Exception as exception:
             raise RuntimeError(
