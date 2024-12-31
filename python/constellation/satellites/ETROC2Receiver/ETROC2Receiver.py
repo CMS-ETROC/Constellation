@@ -45,21 +45,26 @@ class ETROC2Receiver(DataReceiver):
         """Initialize and configure the satellite."""
         # what directory to store files in?
         self.output_path = self.config.setdefault("_output_path", "data")
-        # Do you want to translate the received data and store that instead?
+        # Do you want to translate the received data and store as (.nem)?
         self.translate = self.config.setdefault("translate", 1)
+        # If not translate, then do you want binary format saved data (.bin)? 
+        # O/W saved as text file (.dat) with 32bit lines (032b)
         self.compressed_binary = self.config.setdefault("compressed_binary", 1)
         # what pattern to use for the file names?
+        extension = "dat"
         if(self.translate):
-            self.file_name_pattern = self.config.setdefault("_file_name_pattern", "run_{run_identifier}_{date}.nem")
-        else:
-            self.file_name_pattern = self.config.setdefault("_file_name_pattern", "run_{run_identifier}_{date}.bin")
+            extension = "nem"
+        elif(self.compressed_binary):
+                extension = "bin"
+        self.file_name_pattern = self.config.setdefault("_file_name_pattern", "run_{run_identifier}_{date}."+extension)
         # Do you want to skip fillers in the translated files?
         self.skip_fillers = self.config.setdefault("skip_fillers", 0)
-        self._configure_monitoring(2.0)
         # how often will the file be flushed? Negative values for 'at the end of the run'
         self.flush_interval = self.config.setdefault("flush_interval", 10.0)
-        # Defaults
+        # ETROC2 Frame trailers for the channels in data, "0" + 17bit chip_id
         self.frame_trailers = self.config.setdefault("frame_trailers", {0:0x17f0f,1:0x17f0f,2:0x17f0f,3:0x17f0f})
+        # Defaults
+        self._configure_monitoring(2.0)
         self.fixed_patterns = {
             "clk2_filler":   0x553,     # first 12 bits
             "fifo_filler":   0x556,     # first 12 bits
@@ -81,7 +86,16 @@ class ETROC2Receiver(DataReceiver):
             "frame_trailer": 18,     # first 18 bits
             "frame_data":    1,      # first 1 bit
         }
+        self.buffer_shifts = {
+            1:24,
+            2:16,
+            3:8,
+            4:0
+        }
+        self.file_size_limit = 20*10**6 if self.compressed_binary else 50000 # 20 MB or 50000 lines of text
+        # Running variables used during run/write loop
         self.file_counter = 0
+        self.file_size = 0
         self.translate_int = np.uint64(0)
         self.active_channels = []
         self.active_channel  = -1
@@ -90,12 +104,6 @@ class ETROC2Receiver(DataReceiver):
         self.active_channels_clear = self.active_channels.clear
         self.translate_state = [False, "", ""] # [in_event, previous_state, previous_filler]
         self.event_stats     = [-1, -1, -1]    # [40bit_state, num_32bit_words, current_word]
-        self.buffer_shifts = {
-            1:24,
-            2:16,
-            3:8,
-            4:0
-        }
         return "Configured ETROC2Receiver"
     
     def _reset_params(self) -> None:
@@ -107,10 +115,104 @@ class ETROC2Receiver(DataReceiver):
         self.event_stats[1] = -1
         self.event_stats[2] = -1
     
+    # def do_run(self, run_identifier: str) -> str:
+    #     """Handle the data enqueued by the ZMQ Poller."""
+    #     self.last_flush = datetime.datetime.now()
+    #     return super().do_run(run_identifier)
     def do_run(self, run_identifier: str) -> str:
-        """Handle the data enqueued by the ZMQ Poller."""
+        """Handle the data enqueued by the ZMQ Poller.
+        """
         self.last_flush = datetime.datetime.now()
-        return super().do_run(run_identifier)
+        self.run_identifier = run_identifier
+        outfile = self._open_file()
+        last_msg = datetime.datetime.now()
+        # keep the data collection alive for a few seconds after stopping
+        keep_alive = datetime.datetime.now()
+        transmitter = DataTransmitter("", None)
+        self._reset_receiver_stats()
+        try:
+            # processing loop
+            # assert for mypy static type analysis
+            assert isinstance(self._state_thread_evt, threading.Event), "State thread Event not set up correctly"
+
+            while not self._state_thread_evt.is_set() or ((datetime.datetime.now() - keep_alive).total_seconds() < 60):
+                # refresh keep_alive timestamp
+                if not self._state_thread_evt.is_set():
+                    keep_alive = datetime.datetime.now()
+                else:
+                    if not self.active_satellites:
+                        # no Satellites connected
+                        self.log.info("All EOR received, stopping.")
+                        break
+                # request available data from zmq poller; timeout prevents
+                # deadlock when stopping.
+                assert isinstance(self.poller, zmq.Poller)
+                sockets_ready = dict(self.poller.poll(timeout=250))
+
+                for socket in sockets_ready.keys():
+                    binmsg = socket.recv_multipart()
+                    # NOTE below we determine the size of the list of (binary)
+                    # strings, which is not exactly what went over the network
+                    self.receiver_stats["nbytes"] += sys.getsizeof(binmsg)
+                    self.receiver_stats["npackets"] += 1
+                    # Try to decode the Message
+                    try:
+                        item = transmitter.decode(binmsg)
+                    except Exception as e:
+                        self.log.critical(
+                            "Could not decode message '%s' due to exception: %s",
+                            binmsg,
+                            repr(e),
+                        )
+                        raise RuntimeError("Could not decode message") from e
+                    # Try to write the Message
+                    try:
+                        if item.msgtype == CDTPMessageIdentifier.BOR:
+                            self.active_satellites.append(item.name)
+                            self._write_BOR(outfile, item)
+                        elif item.msgtype == CDTPMessageIdentifier.EOR:
+                            self.active_satellites.remove(item.name)
+                            self._write_EOR(outfile, item)
+                        else:
+                            self._write_data(outfile, item)
+                    except Exception as e:
+                        self.log.critical("Could not write message '%s' to file: %s", item, repr(e))
+                        raise RuntimeError(f"Could not write message '{item}' to file") from e
+                    # time to flush data to file?
+                    if self.flush_interval > 0 and (datetime.datetime.now() - self.last_flush).total_seconds() > self.flush_interval:
+                        outfile.flush()
+                        self.last_flush = datetime.datetime.now()
+                    # In case we've been waiting a bit for the message
+                    if (datetime.datetime.now() - last_msg).total_seconds() > 4.0:
+                        if self._state_thread_evt.is_set():
+                            msg = "Finishing with"
+                        else:
+                            msg = "Processing"
+                        self.log.status(
+                            "%s data packet %s from %s",
+                            msg,
+                            item.sequence_number,
+                            item.name,
+                        )
+                        last_msg = datetime.datetime.now()
+                    # Do we need to make a new file? (prevent very large single files)
+                    if (self.file_size > self.file_size_limit):
+                        outfile.flush()
+                        self._close_file(outfile)
+                        self.file_size = 0
+                        self.file_counter += 1
+                        outfile = self._open_file()
+                        self.last_flush = datetime.datetime.now()
+
+        finally:
+            self._close_file(outfile)
+            if self.active_satellites:
+                self.log.warning(
+                    "Never received EOR from following Satellites: %s",
+                    ", ".join(self.active_satellites),
+                )
+            self.active_satellites = []
+        return f"Finished acquisition"
 
     def _write_EOR(self, outfile: io.IOBase, item: CDTPMessage) -> None:
         """Write data to file"""
@@ -142,37 +244,27 @@ class ETROC2Receiver(DataReceiver):
                 "%s sent data but is no longer assumed active (EOR received)",
                 item.name,
             )
-
         # title = f"data_{self.run_identifier}_{item.sequence_number:09}"
-
         if isinstance(item.payload, bytes):
-            # interpret bytes as array of uint8 if nothing else was specified in the meta
-            payload = np.frombuffer(item.payload, dtype=item.meta.get("dtype", np.uint8))
+            # interpret bytes as array of uint32 if nothing else was specified in the meta
+            payload = np.frombuffer(item.payload, dtype=item.meta.get("dtype", np.uint32))
         elif isinstance(item.payload, list):
             payload = np.array(item.payload)
         elif item.payload is None:
             # empty payload -> empty array of bytes
-            payload = np.array([], dtype=np.uint8)
+            payload = np.array([], dtype=np.uint32)
         else:
             raise TypeError(f"Cannot write payload of type '{type(item.payload)}'")
 
         if(not self.translate):
             if(self.compressed_binary):
-                # binary_text =  map(lambda x: int(x).to_bytes(4, 'little'), payload)
-                # for x in list(binary_text):
-                #     outfile.write(x)
                 outfile.write(b''.join(int(x).to_bytes(4, 'little') for x in payload))
+                self.file_size += 4*len(payload)
             else:
-                # binary_text =  map(lambda x: format(int(x), '032b'), payload)
-                # outfile.write("\n".join(list(binary_text)))
                 outfile.write("\n".join(format(int(x), '032b') for x in payload))
+                self.file_size += len(payload)
         else:
             self._translate_and_write(outfile, payload)
-
-        # time to flush data to file?
-        if self.flush_interval > 0 and (datetime.datetime.now() - self.last_flush).total_seconds() > self.flush_interval:
-            outfile.flush()
-            self.last_flush = datetime.datetime.now()
 
     def _translate_and_write(self, outfile: io.IOBase, payload:  NDArray) -> None:
         for line_int in payload:
@@ -189,12 +281,14 @@ class ETROC2Receiver(DataReceiver):
                         self.translate_state[2] = binary_text
                     if(not self.skip_fillers):
                         outfile.write(f"{filler_type} {binary_text[0:4]} {binary_text[4:12]} {int(binary_text[12:],2)}\n")
+                        self.file_size += 1
                     self.translate_state[1] = "FILLER"
                 # CLOCK2 Filler
                 elif(line_int>>32-self.fixed_pattern_sizes["clk2_filler"] == self.fixed_patterns["clk2_filler"]):
                     binary_text = format(line_int, '032b')[self.fixed_pattern_sizes["clk2_filler"]:]
                     if(not self.skip_fillers):
                         outfile.write(f"CLOCK2 {binary_text}\n")
+                        self.file_size += 1
                     self.translate_state[1] = "FILLER"
                 # Event Header, forces transition into event state
                 elif(line_int>>32-self.fixed_pattern_sizes["event_header"] == self.fixed_patterns["event_header"]):
@@ -218,6 +312,7 @@ class ETROC2Receiver(DataReceiver):
                     else:
                         self._reset_params()
                         outfile.write(f"BROKEN EVENT HEADER!\n")
+                    self.file_size += 1
                 # Translate ETROC2 Frames after HEADER_2
                 elif(self.translate_state[1] == "HEADER_2"):                    
                     self.event_stats[2] += 1
@@ -241,6 +336,7 @@ class ETROC2Receiver(DataReceiver):
                             outfile.write(f"T {self.active_channel} {(to_be_translated >> 16) & 0x3F} {(to_be_translated >> 8) & 0xFF} {to_be_translated & 0xFF}\n")
                         else:
                             outfile.write(f"UNKNOWN 40 bit word!\n")
+                        self.file_size += 1
                     if(self.event_stats[2] == self.event_stats[1]):
                         self.translate_state[1] = "ETROC2"
                 # Translate Event Trailer after ETROC2 Frames
@@ -252,19 +348,28 @@ class ETROC2Receiver(DataReceiver):
                     else:
                         outfile.write(f"BROKEN EVENT NO EVENT TRAILER FOUND!\n")
                     self._reset_params()
+                    self.file_size += 1
                 else:
                     self._reset_params()
                     outfile.write(f"BROKEN EVENT... How did we get here?...\n")
+                    self.file_size += 1
 
 
-    def _open_file(self, filename: pathlib.Path) -> io.IOBase:
+    def _open_file(self) -> io.IOBase:
         """Open the nem file and return the file object."""
+        filename = pathlib.Path(
+            self.file_name_pattern.format(
+                run_identifier=self.run_identifier,
+                date=self.file_counter,
+            )
+        )
         file = None
         if os.path.isfile(filename):
             self.log.critical("file already exists: %s", filename)
             raise RuntimeError(f"file already exists: {filename}")
 
-        self.log.info("Creating file %s", filename)
+        self.log.info("Creating files...")
+        self.log.debug("Creating file %s", filename)
         # Create directory path.
         directory = pathlib.Path(self.output_path)  # os.path.dirname(filename)
         try:
