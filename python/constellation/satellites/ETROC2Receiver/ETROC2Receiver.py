@@ -92,7 +92,7 @@ class ETROC2Receiver(DataReceiver):
             3:8,
             4:0
         }
-        self.file_size_limit = 20*10**6 if self.compressed_binary else 50000 # 20 MB or 50000 lines of text
+        self.file_size_limit = 20*10**6 if (self.compressed_binary and (not self.translate)) else 50000 # 20 MB or 50000 lines of text
         # Running variables used during run/write loop
         self.file_counter = 0
         self.file_size = 0
