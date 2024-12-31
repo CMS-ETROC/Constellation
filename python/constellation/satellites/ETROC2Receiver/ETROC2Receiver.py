@@ -178,12 +178,8 @@ class ETROC2Receiver(DataReceiver):
                     except Exception as e:
                         self.log.critical("Could not write message '%s' to file: %s", item, repr(e))
                         raise RuntimeError(f"Could not write message '{item}' to file") from e
-                    # time to flush data to file?
-                    if self.flush_interval > 0 and (datetime.datetime.now() - self.last_flush).total_seconds() > self.flush_interval:
-                        outfile.flush()
-                        self.last_flush = datetime.datetime.now()
-                    # In case we've been waiting a bit for the message
-                    if (datetime.datetime.now() - last_msg).total_seconds() > 4.0:
+                    # STATUS every 10 sec
+                    if (datetime.datetime.now() - last_msg).total_seconds() > 10.0:
                         if self._state_thread_evt.is_set():
                             msg = "Finishing with"
                         else:
@@ -197,11 +193,14 @@ class ETROC2Receiver(DataReceiver):
                         last_msg = datetime.datetime.now()
                     # Do we need to make a new file? (prevent very large single files)
                     if (self.file_size > self.file_size_limit):
-                        outfile.flush()
                         self._close_file(outfile)
                         self.file_size = 0
                         self.file_counter += 1
                         outfile = self._open_file()
+                        self.last_flush = datetime.datetime.now()
+                    # time to flush data to file?
+                    if self.flush_interval > 0 and (datetime.datetime.now() - self.last_flush).total_seconds() > self.flush_interval:
+                        outfile.flush()
                         self.last_flush = datetime.datetime.now()
 
         finally:
