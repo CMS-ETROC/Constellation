@@ -211,6 +211,8 @@ class ETROC2Receiver(DataReceiver):
                     ", ".join(self.active_satellites),
                 )
             self.active_satellites = []
+            self.file_size = 0
+            self.file_counter = 0
         return f"Finished acquisition"
 
     def _write_EOR(self, outfile: io.IOBase, item: CDTPMessage) -> None:
