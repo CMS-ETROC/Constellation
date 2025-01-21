@@ -347,7 +347,7 @@ class ETROC2Classic(DataSender):
         return "FPGA Reg 13 Set, Data Delay Set", format(read_config_reg(self.connection_socket, 13), '016b'), {}
     def _set_data_phase_delay_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
-        return self.fsm.current_state.id in ["INIT","ORBIT"]
+        return self.fsm.current_state.id in ["ORBIT"]
     
     @cscp_requestable
     def set_fc_phase_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
@@ -362,7 +362,7 @@ class ETROC2Classic(DataSender):
         return "FPGA Reg 7 Set, FC Delay Set", format(read_config_reg(self.connection_socket, 7), '016b'), {}
     def _set_fc_phase_delay_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
-        return self.fsm.current_state.id in ["INIT","ORBIT"]
+        return self.fsm.current_state.id in ["ORBIT"]
 
     # @schedule_metric("lm", MetricsType.LAST_VALUE, 10)
     # def brightness(self) -> int | None:
