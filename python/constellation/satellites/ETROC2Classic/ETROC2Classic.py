@@ -333,6 +333,36 @@ class ETROC2Classic(DataSender):
     def _get_status_register_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
+    
+    @cscp_requestable
+    def set_data_phase_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the Data Phase Delay for DAQ using Reg 13
+        """
+        paramList = request.payload
+        data_delay = paramList[0]
+        timestamp = ((data_delay<<7)+(127)+(7<<13)) & (self.timestamp | (63<<7))
+        self.timestamp = timestamp
+        write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
+        return "FPGA Reg 13 Set, Data Delay Set", format(read_config_reg(self.connection_socket, 13), '016b'), {}
+    def _set_data_phase_delay_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["INIT","ORBIT"]
+    
+    @cscp_requestable
+    def set_fc_phase_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the Fast Command Phase Delay for DAQ using Reg 7
+        """
+        paramList = request.payload
+        fc_delay = paramList[0]
+        counter_duration = ((fc_delay<<10)+1023) & (self.counter_duration | (63<<10))
+        self.counter_duration = counter_duration
+        write_config_reg_decoded(self.connection_socket, "counter_duration", self.counter_duration)
+        return "FPGA Reg 7 Set, FC Delay Set", format(read_config_reg(self.connection_socket, 7), '016b'), {}
+    def _set_fc_phase_delay_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["INIT","ORBIT"]
 
     # @schedule_metric("lm", MetricsType.LAST_VALUE, 10)
     # def brightness(self) -> int | None:
