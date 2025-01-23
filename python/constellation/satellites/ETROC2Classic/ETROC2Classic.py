@@ -315,8 +315,7 @@ class ETROC2Classic(DataSender):
         """
         Return the requested Config Register from the FPGA.
         """
-        paramList = request.payload
-        reg = paramList[0]
+        reg = request.payload
         return "FPGA is Ready", format(read_config_reg(self.connection_socket, reg), '016b'), {}
     def _get_config_register_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
@@ -327,8 +326,7 @@ class ETROC2Classic(DataSender):
         """
         Return the requested Status Register from the FPGA.
         """
-        paramList = request.payload
-        reg = paramList[0]
+        reg = request.payload
         return "FPGA is Ready", format(read_status_reg(self.connection_socket, reg), '016b'), {}
     def _get_status_register_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
@@ -339,8 +337,7 @@ class ETROC2Classic(DataSender):
         """
         Set the Data Phase Delay for DAQ using Reg 13
         """
-        paramList = request.payload
-        data_delay = paramList[0]
+        data_delay = request.payload
         timestamp = ((data_delay<<7)+(127)+(7<<13)) & (self.timestamp | (63<<7))
         self.timestamp = timestamp
         write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
@@ -354,8 +351,7 @@ class ETROC2Classic(DataSender):
         """
         Set the Fast Command Phase Delay for DAQ using Reg 7
         """
-        paramList = request.payload
-        fc_delay = paramList[0]
+        fc_delay = request.payload
         counter_duration = ((fc_delay<<10)+1023) & (self.counter_duration | (63<<10))
         self.counter_duration = counter_duration
         write_config_reg_decoded(self.connection_socket, "counter_duration", self.counter_duration)
