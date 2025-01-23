@@ -359,8 +359,22 @@ class ETROC2Classic(DataSender):
         counter_duration = ((fc_delay<<10)+1023) & (self.counter_duration | (63<<10))
         self.counter_duration = counter_duration
         write_config_reg_decoded(self.connection_socket, "counter_duration", self.counter_duration)
-        return "FPGA Reg 7 Set, FC Delay Set", format(read_config_reg(self.connection_socket, 7), '016b'), {}
+        return "FPGA Reg 7 Set, FC Phase Delay Set", format(read_config_reg(self.connection_socket, 7), '016b'), {}
     def _set_fc_phase_delay_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["ORBIT"]
+    
+    @cscp_requestable
+    def set_fc_bit_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the Fast Command Bit Delay for DAQ using Reg 14
+        """
+        bit_delay = request.payload
+        polarity = ((bit_delay<<10)+(1023)+(3<<14)) & (self.polarity | (15<<10))
+        self.polarity = polarity
+        write_config_reg_decoded(self.connection_socket, "polarity", self.polarity)
+        return "FPGA Reg 14 Set, FC Bit Delay Set", format(read_config_reg(self.connection_socket, 14), '016b'), {}
+    def _set_fc_bit_delay_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
 
