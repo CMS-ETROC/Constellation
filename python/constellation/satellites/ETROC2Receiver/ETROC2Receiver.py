@@ -56,7 +56,7 @@ class ETROC2Receiver(DataReceiver):
             extension = "nem"
         elif(self.compressed_binary):
                 extension = "bin"
-        self.file_name_pattern = self.config.setdefault("_file_name_pattern", "run_{run_identifier}_{date}."+extension)
+        self.file_name_pattern = self.config.setdefault("_file_name_pattern", "{run_identifier}/file_{date}."+extension)
         # Do you want to skip fillers in the translated files?
         self.skip_fillers = self.config.setdefault("skip_fillers", 0)
         # how often will the file be flushed? Negative values for 'at the end of the run'
@@ -364,20 +364,16 @@ class ETROC2Receiver(DataReceiver):
                 date=self.file_counter,
             )
         )
+        directory = pathlib.Path(self.output_path) 
         file = None
-        if os.path.isfile(filename):
-            self.log.critical("file already exists: %s", filename)
-            raise RuntimeError(f"file already exists: {filename}")
+        if os.path.isfile(directory / filename):
+            self.log.critical("file already exists: %s", directory / filename)
+            raise RuntimeError(f"file already exists: {directory / filename}")
 
         self.log.info(f"Creating files in {self.output_path}...")
         self.log.debug("Creating file %s", filename)
-        # Create directory path.
-        directory = pathlib.Path(self.output_path)  # os.path.dirname(filename)
         try:
-            os.makedirs(directory)
-        except (FileExistsError, FileNotFoundError):
-            self.log.debug("Directory %s already exists", directory)
-            pass
+            os.makedirs(directory, exist_ok=True)
         except Exception as exception:
             raise RuntimeError(
                 f"unable to create directory {directory}: \
