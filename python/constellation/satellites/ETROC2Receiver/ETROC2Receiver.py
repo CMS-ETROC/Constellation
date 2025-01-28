@@ -44,7 +44,7 @@ class ETROC2Receiver(DataReceiver):
     def do_initializing(self, config: dict[str, Any]) -> str:
         """Initialize and configure the satellite."""
         # what directory to store files in?
-        self.output_path = self.config.setdefault("_output_path", "data")
+        self.output_path = self.config.setdefault("output_path", "data")
         # Do you want to translate the received data and store as (.nem)?
         self.translate = self.config.setdefault("translate", 1)
         # If not translate, then do you want binary format saved data (.bin)? 
@@ -56,7 +56,7 @@ class ETROC2Receiver(DataReceiver):
             extension = "nem"
         elif(self.compressed_binary):
                 extension = "bin"
-        self.file_name_pattern = self.config.setdefault("_file_name_pattern", "{run_identifier}/file_{date}."+extension)
+        self.file_name_pattern = self.config.setdefault("file_name_pattern", "{run_identifier}/file_{date}."+extension)
         # Do you want to skip fillers in the translated files?
         self.skip_fillers = self.config.setdefault("skip_fillers", 0)
         # how often will the file be flushed? Negative values for 'at the end of the run'
@@ -358,20 +358,19 @@ class ETROC2Receiver(DataReceiver):
 
     def _open_file(self) -> io.IOBase:
         """Open the nem file and return the file object."""
-        filename = pathlib.Path(
-            self.file_name_pattern.format(
-                run_identifier=self.run_identifier,
-                date=self.file_counter,
-            )
-        )
-        directory = pathlib.Path(self.output_path) 
+        filename_list = self.file_name_pattern.format(
+                            run_identifier=self.run_identifier,
+                            date=self.file_counter,
+                        ).strip('/')
+        filename = pathlib.Path(filename_list[1])
+        directory = pathlib.Path(self.output_path) / pathlib.Path(filename_list[0]) 
         file = None
         if os.path.isfile(directory / filename):
             self.log.critical("file already exists: %s", directory / filename)
             raise RuntimeError(f"file already exists: {directory / filename}")
 
-        self.log.info(f"Creating files in {self.output_path}...")
-        self.log.debug("Creating file %s", filename)
+        self.log.info(f"Creating files in {self.output_path}/{filename_list[0]}...")
+        self.log.debug("Creating file %s", filename_list[1])
         try:
             os.makedirs(directory, exist_ok=True)
         except Exception as exception:
