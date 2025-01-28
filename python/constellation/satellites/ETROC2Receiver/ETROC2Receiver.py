@@ -361,7 +361,7 @@ class ETROC2Receiver(DataReceiver):
         filename_list = self.file_name_pattern.format(
                             run_identifier=self.run_identifier,
                             date=self.file_counter,
-                        ).strip('/')
+                        ).split('/')
         filename = pathlib.Path(filename_list[1])
         directory = pathlib.Path(self.output_path) / pathlib.Path(filename_list[0]) 
         file = None
