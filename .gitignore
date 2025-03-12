@@ -6,6 +6,9 @@
 # Build directories
 /build*/
 
+# Data directories
+/data*/
+
 # Python virtual environment
 /venv/
 
