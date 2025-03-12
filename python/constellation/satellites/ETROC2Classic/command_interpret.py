@@ -126,6 +126,9 @@ def write_pulse_reg_decoded(ss, key=""):
 # Reg 15 : {global_trig_delay[4:0],global_trig,trig_or_logic,triple_trig,en_ws_trig,ws_trig_stop_delay[2:0],enableCh[3:0]}
 def write_config_reg_decoded(ss, key="", val=None, prescale_factor=2048):
     config_registers ={
+        "fc_delays": 4,
+        "data_delays_01": 5,
+        "data_delays_23": 6,
         "counter_duration": 7,
         "triggerbit_delay": 8,
         "register_9": 9,
