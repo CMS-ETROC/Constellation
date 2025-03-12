@@ -38,13 +38,16 @@ class ETROC2Classic(DataSender):
         self.log.debug(f"prescale_factor: {self.prescale_factor}")
         self.log.debug(f"counter_duration: {hex(self.counter_duration)}")
         self.log.debug(f"triggerbit_delay: {hex(self.triggerbit_delay)}")
+        self.log.debug(f"fc_delays: {hex(self.fc_delays)}")
+        self.log.debug(f"data_delays_01: {hex(self.data_delays_01)}")
+        self.log.debug(f"data_delays_23: {hex(self.data_delays_23)}")
         self.log.debug(f"num_fifo_read: {self.num_fifo_read}")
         self.log.debug(f"clear_fifo: {self.clear_fifo}")
         self.log.debug(f"reset_counter: {self.reset_counter}")
         self.log.debug(f"fast_command_memo: {self.fast_command_memo}")
 
     def configure_memo_FC(self, memo=None) -> None:
-        if(memo==None): 
+        if(memo==None):
             words = self.fast_command_memo.split(' ')
         else:
             words = memo.split(' ')
@@ -57,7 +60,7 @@ class ETROC2Classic(DataSender):
         Initialize = False
         qinj_loop = 1
         uniform_mode = False
-        if("QInj" in words): 
+        if("QInj" in words):
             QInj=True
             matching_elements = [element for element in words if "repeatedQInj" in element]
             try:
@@ -158,10 +161,13 @@ class ETROC2Classic(DataSender):
         self.prescale_factor = config.setdefault("prescale_factor", 2048)
         self.counter_duration = config.setdefault("counter_duration", 0x0000)
         self.triggerbit_delay = config.setdefault("triggerbit_delay", 0x1800)
+        self.fc_delays = config.setdefault("fc_delays", 0x0000)
+        self.data_delays_01 = config.setdefault("data_delays_01", 0x0000)
+        self.data_delays_23 = config.setdefault("data_delays_23", 0x0000)
         self.num_fifo_read = config.setdefault("num_fifo_read", 65536)
-        self.clear_fifo = config.setdefault("clear_fifo", 1) 
-        self.reset_counter = config.setdefault("reset_counter", 1) 
-        self.fast_command_memo = config.setdefault("fast_command_memo", "Start Triggerbit") 
+        self.clear_fifo = config.setdefault("clear_fifo", 1)
+        self.reset_counter = config.setdefault("reset_counter", 1)
+        self.fast_command_memo = config.setdefault("fast_command_memo", "Start Triggerbit")
         self.connection_socket = None
         # TODO check for valid entries for all config keys
         if self.prescale_factor not in [2048, 4096, 8192, 16384]:
@@ -170,7 +176,7 @@ class ETROC2Classic(DataSender):
         self.log.info(f"Configuration loaded and Defaults set")
         self.print_all_config_params()
         return "Initialized - Configuration loaded and Defaults set"
-    
+
     def do_launching(self) -> str:
         try:
             self.connection_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -186,6 +192,9 @@ class ETROC2Classic(DataSender):
         write_config_reg_decoded(self.connection_socket, "register_10", 0x000, prescale_factor = self.prescale_factor)
         write_config_reg_decoded(self.connection_socket, "polarity", self.polarity)
         write_config_reg_decoded(self.connection_socket, "counter_duration", self.counter_duration)
+        write_config_reg_decoded(self.connection_socket, "fc_delays", self.fc_delays)
+        write_config_reg_decoded(self.connection_socket, "data_delays_01", self.data_delays_01)
+        write_config_reg_decoded(self.connection_socket, "data_delays_23", self.data_delays_23)
         if(self.clear_fifo):
             self.log.info("Clearing FIFO...")
             write_pulse_reg_decoded(self.connection_socket, "clear_fifo")
@@ -225,6 +234,15 @@ class ETROC2Classic(DataSender):
         if "counter_duration" in config_keys:
             self.counter_duration = partial_config["counter_duration"]
             write_config_reg_decoded(self.connection_socket, "counter_duration", self.counter_duration)
+        if "fc_delays" in config_keys:
+            self.fc_delays = partial_config["fc_delays"]
+            write_config_reg_decoded(self.connection_socket, "fc_delays", self.fc_delays)
+        if "data_delays_01" in config_keys:
+            self.data_delays_01 = partial_config["data_delays_01"]
+            write_config_reg_decoded(self.connection_socket, "data_delays_01", self.data_delays_01)
+        if "data_delays_23" in config_keys:
+            self.data_delays_23 = partial_config["data_delays_23"]
+            write_config_reg_decoded(self.connection_socket, "data_delays_23", self.data_delays_23)
         if "prescale_factor" in config_keys:
             self.prescale_factor = partial_config["prescale_factor"]
             write_config_reg_decoded(self.connection_socket, "register_10", 0x000, prescale_factor = self.prescale_factor)
@@ -234,7 +252,7 @@ class ETROC2Classic(DataSender):
         self.log.info(f"FPGA Registers and Fast Command reconfigured")
         self.print_all_config_params()
         return f"Reconfigured - FPGA Registers and Fast Command reconfigured"
-    
+
     def do_starting(self, run_identifier: str) -> str:
         """
         move to data taking position
@@ -265,9 +283,9 @@ class ETROC2Classic(DataSender):
         write_pulse_reg_decoded(self.connection_socket, "start_DAQ")
         time.sleep(0.1)
         self.log.debug(f"Status of DAQ Toggle after Start Pulse: {format(read_status_reg(self.connection_socket, 5), '016b')}")
- 
+
         return f"Run {run_identifier} Session Started"
-    
+
     #     self.EOR = {"start_of_loop_time": self.start_of_loop_time, "end_of_loop_time": self.end_of_loop_time}
     def do_stopping(self) -> str:
         """End the run. Add run metadata for end-of-run event"""
@@ -309,7 +327,7 @@ class ETROC2Classic(DataSender):
             # Format payload to serializable
             self.data_queue.put((mem_data.tobytes(), meta))
         return "Finished acquisition"
-    
+
     @cscp_requestable
     def get_config_register(self, request: CSCPMessage) -> tuple[str, Any, dict]:
         """
@@ -320,7 +338,7 @@ class ETROC2Classic(DataSender):
     def _get_config_register_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
-    
+
     @cscp_requestable
     def get_status_register(self, request: CSCPMessage) -> tuple[str, Any, dict]:
         """
@@ -331,7 +349,7 @@ class ETROC2Classic(DataSender):
     def _get_status_register_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
-    
+
     @cscp_requestable
     def set_data_phase_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
         """
@@ -345,13 +363,41 @@ class ETROC2Classic(DataSender):
     def _set_data_phase_delay_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
-    
+
+    @cscp_requestable
+    def set_data_phase_channel_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the Data Phase Delay for specified channel for DAQ using Reg 5 or 6
+        """
+        data_delay, channel = request.payload[0], request.payload[1]
+        if(data_delay>39): data_delay=39
+        if(data_delay<0):  data_delay=0
+        if(channel>3): channel=3
+        if(channel<0): channel=0
+        if(channel<2):
+            shift = 0 if channel == 0 else 8
+            data_delays_01 = ((int(2**(16-shift-6) - 1)<<int(shift+6)) + (data_delay<<shift) + int(2**(shift) - 1)) & (self.data_delays_01 | (63<<shift))
+            self.data_delays_01 = data_delays_01
+            write_config_reg_decoded(self.connection_socket, "data_delays_01", self.data_delays_01)
+            return "FPGA Reg 5 Set, Data Delay Set", format(read_config_reg(self.connection_socket, 5), '016b'), {}
+        else:
+            shift = 0 if channel == 2 else 8
+            data_delays_23 = ((int(2**(16-shift-6) - 1)<<int(shift+6)) + (data_delay<<shift) + int(2**(shift) - 1)) & (self.data_delays_23 | (63<<shift))
+            self.data_delays_23 = data_delays_23
+            write_config_reg_decoded(self.connection_socket, "data_delays_23", self.data_delays_23)
+            return "FPGA Reg 6 Set, Data Delay Set", format(read_config_reg(self.connection_socket, 6), '016b'), {}
+    def _set_data_phase_channel_delay_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["ORBIT"]
+
     @cscp_requestable
     def set_fc_phase_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
         """
         Set the Fast Command Phase Delay for DAQ using Reg 7
         """
         fc_delay = request.payload
+        if(fc_delay>63): fc_delay=63
+        if(fc_delay<0):  fc_delay=0
         counter_duration = ((fc_delay<<10)+1023) & (self.counter_duration | (63<<10))
         self.counter_duration = counter_duration
         write_config_reg_decoded(self.connection_socket, "counter_duration", self.counter_duration)
@@ -359,7 +405,25 @@ class ETROC2Classic(DataSender):
     def _set_fc_phase_delay_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
-    
+
+    @cscp_requestable
+    def set_fc_phase_channel_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the Fast Command Phase Delay for specified channel in Reg 4
+        """
+        fc_delay, channel = request.payload[0], request.payload[1]
+        if(fc_delay>15): fc_delay=15
+        if(fc_delay<0):  fc_delay=0
+        if(channel>3): channel=3
+        if(channel<0): channel=0
+        fc_delays = ((int(2**(4*(3-channel)) - 1)<<int(4*(channel+1))) + (fc_delay<<int(4*channel)) + int(2**(4*channel) - 1)) & (self.fc_delays | (15<<int(4*channel)))
+        self.fc_delays = fc_delays
+        write_config_reg_decoded(self.connection_socket, "fc_delays", self.fc_delays)
+        return "FPGA Reg 4 Set, FC Phase Delay Set", format(read_config_reg(self.connection_socket, 4), '016b'), {}
+    def _set_fc_phase_channel_delay_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["ORBIT"]
+
     @cscp_requestable
     def set_fc_bit_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
         """
