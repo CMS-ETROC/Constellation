@@ -28,23 +28,23 @@ class ETROC2Classic(DataSender):
     """Example for a Satellite class."""
 
     def print_all_config_params(self) -> None:
-        self.log.debug("Printing All Config Params...")
-        self.log.debug(f"hostname: {self.hostname}")
-        self.log.debug(f"port: {self.port}")
-        self.log.debug(f"polarity: {hex(self.polarity)}")
-        self.log.debug(f"firmware: {self.firmware}")
-        self.log.debug(f"timestamp: {hex(self.timestamp)}")
-        self.log.debug(f"active_channel: {hex(self.active_channel)}")
-        self.log.debug(f"prescale_factor: {self.prescale_factor}")
-        self.log.debug(f"counter_duration: {hex(self.counter_duration)}")
-        self.log.debug(f"triggerbit_delay: {hex(self.triggerbit_delay)}")
-        self.log.debug(f"fc_delays: {hex(self.fc_delays)}")
-        self.log.debug(f"data_delays_01: {hex(self.data_delays_01)}")
-        self.log.debug(f"data_delays_23: {hex(self.data_delays_23)}")
-        self.log.debug(f"num_fifo_read: {self.num_fifo_read}")
-        self.log.debug(f"clear_fifo: {self.clear_fifo}")
-        self.log.debug(f"reset_counter: {self.reset_counter}")
-        self.log.debug(f"fast_command_memo: {self.fast_command_memo}")
+        self.log.info("Printing All Config Params...")
+        self.log.info(f"hostname: {self.hostname}")
+        self.log.info(f"port: {self.port}")
+        self.log.info(f"polarity: {hex(self.polarity)}")
+        self.log.info(f"firmware: {self.firmware}")
+        self.log.info(f"timestamp: {hex(self.timestamp)}")
+        self.log.info(f"active_channel: {hex(self.active_channel)}")
+        self.log.info(f"prescale_factor: {self.prescale_factor}")
+        self.log.info(f"counter_duration: {hex(self.counter_duration)}")
+        self.log.info(f"triggerbit_delay: {hex(self.triggerbit_delay)}")
+        self.log.info(f"fc_delays: {hex(self.fc_delays)}")
+        self.log.info(f"data_delays_01: {hex(self.data_delays_01)}")
+        self.log.info(f"data_delays_23: {hex(self.data_delays_23)}")
+        self.log.info(f"num_fifo_read: {self.num_fifo_read}")
+        self.log.info(f"clear_fifo: {self.clear_fifo}")
+        self.log.info(f"reset_counter: {self.reset_counter}")
+        self.log.info(f"fast_command_memo: {self.fast_command_memo}")
 
     def configure_memo_FC(self, memo=None) -> None:
         if(memo==None):
@@ -311,7 +311,7 @@ class ETROC2Classic(DataSender):
 
     def do_run(self, payload: any) -> str:
         """Run the satellite. Collect data from buffers and send it."""
-        self.log.debug("ETROC2Classic satellite running, publishing events...")
+        self.log.info("ETROC2Classic satellite running, publishing events...")
         while not self._state_thread_evt.is_set():
             # Main DAQ-loop
             mem_data = np.array(read_data_fifo(self.connection_socket, self.num_fifo_read))
