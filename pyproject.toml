@@ -53,6 +53,7 @@ SatelliteLakeShore218 = "constellation.satellites.LakeShore218.__main__:main"
 SatelliteMariner = "constellation.satellites.Mariner.__main__:main"
 SatelliteETROC2Classic = "constellation.satellites.ETROC2Classic.__main__:main"
 SatelliteETROC2Receiver = "constellation.satellites.ETROC2Receiver.__main__:main"
+SatelliteETROC2Waveform = "constellation.satellites.ETROC2Waveform.__main__:main"
 
 [project.urls]
 Homepage = "https://constellation.pages.desy.de/"
