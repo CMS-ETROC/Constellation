@@ -437,6 +437,18 @@ class ETROC2Classic(DataSender):
     def _set_fc_bit_delay_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
+    
+    @cscp_requestable
+    def set_timestamp(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the Timestamp for DAQ using Reg 13
+        """
+        self.timestamp = request.payload
+        write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
+        return "FPGA Reg 13 Set, Timestamp Set", format(read_config_reg(self.connection_socket, 13), '016b'), {}
+    def _set_timestamp_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["ORBIT"]
 
     # @schedule_metric("lm", MetricsType.LAST_VALUE, 10)
     # def brightness(self) -> int | None:
