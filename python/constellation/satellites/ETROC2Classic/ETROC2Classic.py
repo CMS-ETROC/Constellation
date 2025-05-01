@@ -465,6 +465,18 @@ class ETROC2Classic(DataSender):
     def _set_active_channel_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
+    
+    @cscp_requestable
+    def set_fast_command_memo(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the Fast Command Memo
+        """
+        self.fast_command_memo = request.payload
+        self.configure_memo_FC()
+        return "Fast Command Configured", self.fast_command_memo, {}
+    def _set_fast_command_memo_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["ORBIT"]
 
     # @schedule_metric("lm", MetricsType.LAST_VALUE, 10)
     # def brightness(self) -> int | None:
