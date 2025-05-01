@@ -50,13 +50,13 @@ class ETROC2Receiver(DataReceiver):
         # If not translate, then do you want binary format saved data (.bin)? 
         # O/W saved as text file (.dat) with 32bit lines (032b)
         self.compressed_binary = self.config.setdefault("compressed_binary", 1)
-        # what pattern to use for the file names?
-        extension = "dat"
-        if(self.translate):
-            extension = "nem"
-        elif(self.compressed_binary):
-                extension = "bin"
-        self.file_name_pattern = self.config.setdefault("file_name_pattern", "{run_identifier}/file_{date}."+extension)
+        # # what pattern to use for the file names?
+        # extension = "dat"
+        # if(self.translate):
+        #     extension = "nem"
+        # elif(self.compressed_binary):
+        #         extension = "bin"
+        # self.file_name_pattern = self.config.setdefault("file_name_pattern", "{run_identifier}/file_{date}."+extension)
         # Do you want to skip fillers in the translated files?
         self.skip_fillers = self.config.setdefault("skip_fillers", 0)
         # how often will the file be flushed? Negative values for 'at the end of the run'
@@ -122,6 +122,13 @@ class ETROC2Receiver(DataReceiver):
     def do_run(self, run_identifier: str) -> str:
         """Handle the data enqueued by the ZMQ Poller.
         """
+        # what pattern to use for the file names?
+        extension = "dat"
+        if(self.translate):
+            extension = "nem"
+        elif(self.compressed_binary):
+                extension = "bin"
+        self.file_name_pattern = self.config.setdefault("file_name_pattern", "{run_identifier}/file_{date}."+extension)
         self.last_flush = datetime.datetime.now()
         self.run_identifier = run_identifier
         outfile = self._open_file()
@@ -393,3 +400,14 @@ class ETROC2Receiver(DataReceiver):
     def _close_file(self, outfile: io.IOBase) -> None:
         """Close the filehandler"""
         outfile.close()
+
+    @cscp_requestable
+    def set_translate(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set translation state for Receiver
+        """
+        self.translate = request.payload
+        return "Translate set", self.translate, {}
+    def _set_translate_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["ORBIT"]
