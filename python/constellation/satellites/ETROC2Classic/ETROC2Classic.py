@@ -412,14 +412,23 @@ class ETROC2Classic(DataSender):
         Set the Fast Command Phase Delay for specified channel in Reg 4
         """
         fc_delay, channel = request.payload[0], request.payload[1]
-        if(fc_delay>15): fc_delay=15
+        if(fc_delay>31): fc_delay=31
         if(fc_delay<0):  fc_delay=0
         if(channel>3): channel=3
         if(channel<0): channel=0
-        fc_delays = ((int(2**(4*(3-channel)) - 1)<<int(4*(channel+1))) + (fc_delay<<int(4*channel)) + int(2**(4*channel) - 1)) & (self.fc_delays | (15<<int(4*channel)))
+        fc_delays = ((int(2**(4*(3-channel)) - 1)<<int(4*(channel+1))) + ((fc_delay&0xf)<<int(4*channel)) + int(2**(4*channel) - 1)) & (self.fc_delays | (15<<int(4*channel)))
         self.fc_delays = fc_delays
         write_config_reg_decoded(self.connection_socket, "fc_delays", self.fc_delays)
-        return "FPGA Reg 4 Set, FC Phase Delay Set", format(read_config_reg(self.connection_socket, 4), '016b'), {}
+        msb = fc_delay>>4
+        shift = -1 
+        if channel == 0: shift = 6
+        elif channel == 1: shift = 7
+        elif channel == 2: shift = 14
+        elif channel == 3: shift = 15
+        data_delays_01 = (msb<<shift) | (self.data_delays_01 & ((~(1<<shift))&0xffff))
+        self.data_delays_01 = data_delays_01
+        write_config_reg_decoded(self.connection_socket, "data_delays_01", self.data_delays_01)
+        return "FPGA Reg 4 and 5 Set, FC Phase Delay Set", [format(read_config_reg(self.connection_socket, 4), '016b'), format(read_config_reg(self.connection_socket, 5), '016b')], {}
     def _set_fc_phase_channel_delay_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
