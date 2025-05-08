@@ -403,6 +403,32 @@ class ETROC2Waveform(Satellite):
         return self.fsm.current_state.id in ["ORBIT"]
 
     @cscp_requestable
+    def set_data_phase_channel_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the Data Phase Delay for specified channel for DAQ using Reg 5 or 6
+        """
+        data_delay, channel = request.payload[0], request.payload[1]
+        if(data_delay>39): data_delay=39
+        if(data_delay<0):  data_delay=0
+        if(channel>3): channel=3
+        if(channel<0): channel=0
+        if(channel<2):
+            shift = 0 if channel == 0 else 8
+            data_delays_01 = ((int(2**(16-shift-6) - 1)<<int(shift+6)) + (data_delay<<shift) + int(2**(shift) - 1)) & (self.data_delays_01 | (63<<shift))
+            self.data_delays_01 = data_delays_01
+            write_config_reg_decoded(self.connection_socket, "data_delays_01", self.data_delays_01)
+            return "FPGA Reg 5 Set, Data Delay Set", format(read_config_reg(self.connection_socket, 5), '016b'), {}
+        else:
+            shift = 0 if channel == 2 else 8
+            data_delays_23 = ((int(2**(16-shift-6) - 1)<<int(shift+6)) + (data_delay<<shift) + int(2**(shift) - 1)) & (self.data_delays_23 | (63<<shift))
+            self.data_delays_23 = data_delays_23
+            write_config_reg_decoded(self.connection_socket, "data_delays_23", self.data_delays_23)
+            return "FPGA Reg 6 Set, Data Delay Set", format(read_config_reg(self.connection_socket, 6), '016b'), {}
+    def _set_data_phase_channel_delay_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["ORBIT"]
+
+    @cscp_requestable
     def set_fc_phase_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
         """
         Set the Fast Command Phase Delay for DAQ using Reg 7
@@ -419,6 +445,33 @@ class ETROC2Waveform(Satellite):
         return self.fsm.current_state.id in ["ORBIT"]
 
     @cscp_requestable
+    def set_fc_phase_channel_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the Fast Command Phase Delay for specified channel in Reg 4
+        """
+        fc_delay, channel = request.payload[0], request.payload[1]
+        if(fc_delay>31): fc_delay=31
+        if(fc_delay<0):  fc_delay=0
+        if(channel>3): channel=3
+        if(channel<0): channel=0
+        fc_delays = ((int(2**(4*(3-channel)) - 1)<<int(4*(channel+1))) + ((fc_delay&0xf)<<int(4*channel)) + int(2**(4*channel) - 1)) & (self.fc_delays | (15<<int(4*channel)))
+        self.fc_delays = fc_delays
+        write_config_reg_decoded(self.connection_socket, "fc_delays", self.fc_delays)
+        msb = fc_delay>>4
+        shift = -1 
+        if channel == 0: shift = 6
+        elif channel == 1: shift = 7
+        elif channel == 2: shift = 14
+        elif channel == 3: shift = 15
+        data_delays_01 = (msb<<shift) | (self.data_delays_01 & ((~(1<<shift))&0xffff))
+        self.data_delays_01 = data_delays_01
+        write_config_reg_decoded(self.connection_socket, "data_delays_01", self.data_delays_01)
+        return "FPGA Reg 4 and 5 Set, FC Phase Delay Set", [format(read_config_reg(self.connection_socket, 4), '016b'), format(read_config_reg(self.connection_socket, 5), '016b')], {}
+    def _set_fc_phase_channel_delay_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["ORBIT"]
+
+    @cscp_requestable
     def set_fc_bit_delay(self, request: CSCPMessage) -> tuple[str, Any, dict]:
         """
         Set the Fast Command Bit Delay for DAQ using Reg 14
@@ -429,5 +482,45 @@ class ETROC2Waveform(Satellite):
         write_config_reg_decoded(self.connection_socket, "polarity", self.polarity)
         return "FPGA Reg 14 Set, FC Bit Delay Set", format(read_config_reg(self.connection_socket, 14), '016b'), {}
     def _set_fc_bit_delay_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["ORBIT"]
+    
+    @cscp_requestable
+    def set_ledpage(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the ledpage for DAQ using Reg 13
+        """
+        ledpage = request.payload
+        if(ledpage>5): ledpage=5
+        if(ledpage<0): ledpage=0
+        timestamp = ((2047<<5) + (ledpage<<2) + (3)) & (self.timestamp | (7<<2))
+        self.timestamp = timestamp
+        write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
+        return "FPGA Reg 13 Set, Led Page Set", format(read_config_reg(self.connection_socket, 13), '016b'), {}
+    def _set_timestamp_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["ORBIT"]
+    
+    @cscp_requestable
+    def set_active_channel(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the active_channel for DAQ using Reg 15
+        """
+        self.active_channel = request.payload
+        write_config_reg_decoded(self.connection_socket, "active_channel", self.active_channel)
+        return "FPGA Reg 15 Set, active_channel Set", format(read_config_reg(self.connection_socket, 15), '016b'), {}
+    def _set_active_channel_is_allowed(self, request: CSCPMessage) -> bool:
+        """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
+        return self.fsm.current_state.id in ["ORBIT"]
+    
+    @cscp_requestable
+    def set_fast_command_memo(self, request: CSCPMessage) -> tuple[str, Any, dict]:
+        """
+        Set the Fast Command Memo
+        """
+        self.fast_command_memo = request.payload
+        self.configure_memo_FC()
+        return "Fast Command Configured", self.fast_command_memo, {}
+    def _set_fast_command_memo_is_allowed(self, request: CSCPMessage) -> bool:
         """Allow in the state ORBIT only, when the socket is connected to the FPGA"""
         return self.fsm.current_state.id in ["ORBIT"]
