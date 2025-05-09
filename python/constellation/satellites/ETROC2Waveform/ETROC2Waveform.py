@@ -364,6 +364,7 @@ class ETROC2Waveform(Satellite):
                     )
             self.i2c_conn.start_ws_sampling()
             write_pulse_reg_decoded(self.connection_socket, "clear_ws_block")
+            # time.sleep(1)
         return "Finished acquisition"
 
     @cscp_requestable
