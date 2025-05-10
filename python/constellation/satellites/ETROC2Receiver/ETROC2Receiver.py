@@ -125,7 +125,7 @@ class ETROC2Receiver(DataReceiver):
         # what pattern to use for the file names?
         extension = "dat"
         if(self.translate):
-            extension = "nem"
+            extension = "sem"
         elif(self.compressed_binary):
                 extension = "bin"
         self.file_name_pattern = self.config.setdefault("file_name_pattern", "{run_identifier}/file_{date}."+extension)
