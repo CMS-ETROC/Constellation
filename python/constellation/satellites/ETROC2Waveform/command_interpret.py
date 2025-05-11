@@ -106,6 +106,7 @@ def write_pulse_reg_decoded(ss, key=""):
         "start_DAQ": 0x0200,
         "stop_DAQ": 0x0400,
         "start_phase_detect": 0x0800,
+        "ws_clear_pulse": 0x1000,
     }
     if key not in pulse_registers:
         RuntimeError("Invalid Pulse Register Key given!")
