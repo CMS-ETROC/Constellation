@@ -59,6 +59,8 @@ class ETROC2Receiver(DataReceiver):
         # self.file_name_pattern = self.config.setdefault("file_name_pattern", "{run_identifier}/file_{date}."+extension)
         # Do you want to skip fillers in the translated files?
         self.skip_fillers = self.config.setdefault("skip_fillers", 0)
+        # keep time fillers even if skip fillers is active
+        self.keep_time = self.config.setdefault("keep_time", 1)
         # how often will the file be flushed? Negative values for 'at the end of the run'
         self.flush_interval = self.config.setdefault("flush_interval", 10.0)
         # ETROC2 Frame trailers for the channels in data, "0" + 17bit chip_id
@@ -266,8 +268,27 @@ class ETROC2Receiver(DataReceiver):
 
         if(not self.translate):
             if(self.compressed_binary):
-                outfile.write(b''.join(int(x).to_bytes(4, 'little') for x in payload))
-                self.file_size += 4*len(payload)
+                if self.skip_fillers:
+                    filtered_payload = []
+                    for x in payload:
+                        if (x>>(32-self.fixed_pattern_sizes["event_header"])) == self.fixed_patterns["event_header"]:
+                            self.translate_state[0] = True # in event
+                        elif (x>>(32-self.fixed_pattern_sizes["event_trailer"])) == self.fixed_patterns["event_trailer"]:
+                            self.translate_state[0] = False # not in event
+
+                        if not self.translate_state[0]: # if not in_event
+                            if self.keep_time:
+                                if ((x>>(20)) not in [self.fixed_patterns["fifo_filler"], 0x555]): # If one of these firmware fillers, then we drop the word
+                                    filtered_payload.append(x)
+                            else:
+                                if ((x>>(20)) not in [self.fixed_patterns["fifo_filler"], 0x555, self.fixed_patterns["time_filler"], self.fixed_patterns["clk2_filler"]]):
+                                    filtered_payload.append(x)
+                        else:
+                            filtered_payload.append(x)
+                else:
+                    filtered_payload = payload
+                outfile.write(b''.join(int(x).to_bytes(4, 'little') for x in filtered_payload))
+                self.file_size += 4*len(filtered_payload)
             else:
                 outfile.write("\n".join(format(int(x), '032b') for x in payload))
                 self.file_size += len(payload)
