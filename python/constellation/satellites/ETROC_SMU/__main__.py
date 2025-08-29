@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Yifan Wang
+# SPDX-FileCopyrightText: 
 # SPDX-License-Identifier: CC-BY-4.0
 from constellation.core.base import setup_cli_logging, EPILOG
 from constellation.core.datasender import DataSenderArgumentParser
