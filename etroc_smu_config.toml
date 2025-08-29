@@ -1,0 +1,15 @@
+[satellites.ETROC_SMU.ETROC_DAQ]
+
+# --- kcu and rb config ---
+kcu_ip = "192.168.0.10"
+readout_board_id = 0
+readout_board_config = "default"
+
+elinks_map = { "0" = [0, 4, 8, 12] }
+
+[satellites.ETROC2Receiver.EtrocReceiver]
+_data_transmitters = ["ETROC_SMU.ETROC_DAQ"]
+output_path = "/home/roy/yf_temp/tamalero/daq_output_raw"
+translate = false
+compressed_binary = true
+skip-fillers = false

@@ -47,6 +47,7 @@ class H5DataWriter(DataReceiver):
 
     def _write_BOR(self, outfile: h5py.File, item: CDTPMessage) -> None:
         """Write BOR to file"""
+        self.log.info(f"Received BOR payload to write: {item.payload}")
         if item.name not in outfile.keys():
             grp = outfile.create_group(item.name).create_group("BOR")
             # add payload dict information as attributes

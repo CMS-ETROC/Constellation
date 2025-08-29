@@ -1,0 +1,2 @@
+[console_scripts]
+hist = hist.classichist:main

@@ -1,0 +1,25 @@
+Metadata-Version: 2.1
+Name: yahist
+Version: 1.14.0
+Summary: Yet another histogram object with numpy and matplotlib
+Home-page: https://github.com/aminnj/yahist
+Author: Nick Amin
+Author-email: amin.nj@gmail.com
+License: BSD
+Download-URL: https://github.com/aminnj/yahist/tarball/1.14.0
+Platform: UNKNOWN
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 2.7
+Requires-Dist: numpy
+Requires-Dist: boost-histogram (>=1.0)
+Requires-Dist: matplotlib
+Requires-Dist: scipy
+Requires-Dist: iminuit (>=2)
+Requires-Dist: plotly
+
+See github for fully rendered README
+
+
