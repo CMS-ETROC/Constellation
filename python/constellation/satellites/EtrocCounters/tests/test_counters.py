@@ -1,0 +1,160 @@
+"""
+SPDX-FileCopyrightText: 2025 DESY and the Constellation authors
+SPDX-License-Identifier: EUPL-1.2
+"""
+
+import socket
+
+import pytest
+
+from ...EtrocCommon import cmd_interpret
+from ..counters import (
+    EXPECTED_L1A_PER_WINDOW,
+    CounterReader,
+    CounterTimeoutError,
+    KC705Link,
+    decode_led8,
+    decode_page0,
+    refresh_delta,
+    refresh_from_words,
+)
+from .fakes import FakeChip, FakeKC705
+
+WINDOW = 0.05
+
+# combine 0xBEEF, trig 0x12345678, refresh 0x9ABC, header 11223, data 0xDEADBEEF, LED8 0xA5, ws_ready 1
+PAGE0_WORDS = [0x0001, 0xA500, 0xEF00, 0xADBE, 0xD7DE, 0x002B, 0xBC00, 0x789A, 0x3456, 0xEF12, 0x00BE]
+
+
+@pytest.fixture
+def board():
+    fake = FakeKC705(chip=FakeChip({(0, 0): (500, 4)}), window_s=WINDOW).start()
+    link = KC705Link("127.0.0.1", fake.port, connect_timeout=2.0, io_timeout=2.0)
+    link.open()
+    yield fake, link, CounterReader(link, window_s=WINDOW, poll_s=WINDOW / 5)
+    link.close()
+    fake.stop()
+
+
+def test_decode_page0_literal_words():
+    assert decode_page0(PAGE0_WORDS) == {
+        "ws_ready": 1,
+        "led8": 0xA5,
+        "data": 0xDEADBEEF,
+        "header": 11223,
+        "refresh": 0x9ABC,
+        "trigbit": 0x12345678,
+        "combine": 0xBEEF,
+    }
+    assert refresh_from_words(PAGE0_WORDS[6], PAGE0_WORDS[7]) == 0x9ABC
+
+
+def test_decode_page0_needs_eleven_words():
+    with pytest.raises(ValueError):
+        decode_page0(PAGE0_WORDS[:10])
+
+
+def test_led8_fields():
+    assert decode_led8(0b10_1_0_1_0_1_0) == {
+        "monitor_sel": 2, "is_data_ex": 1, "is_head_ex": 0, "trig_synched": 1,
+        "trig_error": 0, "synched": 1, "data_error": 0,
+    }
+
+
+def test_refresh_delta_wraps():
+    assert refresh_delta(3, 0xFFFE) == 5
+    assert refresh_delta(10, 8) == 2
+
+
+def test_expected_l1a_rate_is_one_per_orbit():
+    assert int(EXPECTED_L1A_PER_WINDOW) == 11223
+
+
+def test_reg7_is_never_written(board):
+    fake, link, _ = board
+    with pytest.raises(ValueError):
+        link.write_config(7, 0x1234)
+    with pytest.raises(ValueError):
+        link.write_named_config("counter_duration", 0x1234)
+    assert fake.writes_to(7) == []
+
+
+def test_set_channel_changes_only_led_and_status_page_bits(board):
+    fake, link, reader = board
+    fake.config[13] = 0x1F83
+    reader.set_channel(2)
+    assert reader.get_channel() == 2
+    assert fake.config[13] == 0x1F88
+    with pytest.raises(ValueError):
+        reader.set_channel(4)
+
+
+def test_layout_check_passes_on_firmware_addressing(board):
+    _, link, reader = board
+    result = reader.check_status_layout()
+    assert result["ok"], result
+    assert link.read_config(13) & 0b11 == 0
+
+
+def test_layout_check_detects_wrong_word_order():
+    fake = FakeKC705(window_s=WINDOW, reversed_words=True).start()
+    link = KC705Link("127.0.0.1", fake.port, 2.0, 2.0)
+    link.open()
+    try:
+        assert not CounterReader(link, window_s=WINDOW).check_status_layout()["ok"]
+    finally:
+        link.close()
+        fake.stop()
+
+
+def test_header_count_follows_fc_pattern(board):
+    fake, link, reader = board
+    reader.set_channel(0)
+    link.configure_fc("Start QInj L1A Triggerbit")
+    w = reader.wait_windows(2)
+    assert w.header == 11223
+    assert w.channel == 0
+    assert w.en_l1a == 1
+    assert decode_led8(w.led8)["monitor_sel"] == 0
+
+    link.configure_fc("Start Triggerbit")
+    w2 = reader.wait_windows(2)
+    assert w2.header == 0
+    assert refresh_delta(w2.refresh, w.refresh) >= 2
+    assert fake.pulses(0x0002) == 0
+
+
+def test_wait_windows_reports_unaligned_link(board):
+    _, _, reader = board
+    reader.set_channel(1)
+    with pytest.raises(CounterTimeoutError, match="not aligned"):
+        reader.wait_windows(2)
+
+
+def test_wait_windows_honours_stop_event(board):
+    import threading
+
+    _, _, reader = board
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(InterruptedError):
+        reader.wait_windows(2, stop)
+
+
+def test_closed_port_gives_single_client_hint():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    with pytest.raises(ConnectionError, match="ONE TCP client"):
+        cmd_interpret.open_socket("127.0.0.1", port, connect_timeout=1.0)
+
+
+def test_handshake_timeout_is_bounded(monkeypatch):
+    def no_answer(address, timeout):
+        assert timeout == 0.5
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(cmd_interpret.socket, "create_connection", no_answer)
+    with pytest.raises(ConnectionError, match="did not complete the TCP handshake within 0.5 s"):
+        cmd_interpret.open_socket("192.168.2.3", 1024, connect_timeout=0.5)
