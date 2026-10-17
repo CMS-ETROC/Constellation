@@ -1,0 +1,23 @@
+# EtrocCounters on the KC705 bench (Constellation 1.x section names: [Type.name]).
+# Launch: SatelliteEtrocCounters -g wh -n One ; Controller -g wh -n One -c example_counters.toml
+# EtrocTransmitter/EtrocWaveform must not be launched at the same time (one TCP client).
+
+[EtrocCounters.One]
+hostname = "192.168.2.3"
+port = 1024
+channel = 0
+fc_mode_on_launch = "idle"
+output_path = "/home/daq/ETROC2/ETROC-Data/counters"
+
+# ETROC2 over I2C (USB-ISS); leave i2c_port empty to read counters only
+i2c_port = "/dev/ttyACM0"
+chip_address = 0x60
+chip_name = "ET2p03_Bare"
+chip_setup = "none"          # "basic" runs PLL/FC calibration and disables all pixels at launch
+l1a_delay = 0x01f5
+
+# Optional KC705 registers written at launch (Reg7 / counter_duration is refused)
+[EtrocCounters.One.kc705_registers]
+triggerbit_delay = 0x1800
+polarity = 0x4023
+active_channel = 0x0001
