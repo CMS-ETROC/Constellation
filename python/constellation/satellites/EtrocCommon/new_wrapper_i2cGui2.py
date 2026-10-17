@@ -93,6 +93,10 @@ class i2c_connection:
 
         return self._chips[addr]
 
+    def get_chip(self, addr: int) -> i2c_gui2.ETROC2_Chip:
+        """Public access to the cached chip object for `addr`."""
+        return self._resolve_chip(addr)
+
     def config_TDC_window_ranges_in_memory(self, addr: int, window_dict: dict = None):
         chip = self._resolve_chip(addr)
 

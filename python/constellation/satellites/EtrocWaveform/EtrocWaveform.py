@@ -3,17 +3,23 @@ SPDX-FileCopyrightText: 2025 DESY and the Constellation authors
 SPDX-License-Identifier: EUPL-1.2
 """
 
-from constellation.core.commandmanager import cscp_requestable
-from constellation.core.cscp import CSCP1Message
+import re
+import time
+from pathlib import Path
+
 from constellation.core.configuration import Configuration
 from constellation.core.satellite import Satellite
-from . import cmd_interpret
-from .new_wrapper_i2cGui2 import i2c_connection
-from typing import Any
-from pathlib import Path
-import time, socket
 
-class EtrocWaveform(Satellite):
+from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
+from ..EtrocCommon.commands import KC705RegisterCommands
+from ..EtrocCommon.config import load_typed_config
+
+_WAVEFORM_MEMO_WORDS = {"QInj", "L1A", "L1ARange", "BCR", "Triggerbit", "Start", "uniform"}
+_REPEATED_RE = re.compile(r"^repeatedQInj(=\d+)?$")
+
+
+class EtrocWaveform(KC705RegisterCommands, Satellite, version=ETROC_SATELLITES_VERSION):
+    """Waveform-sampler readout: configures the ETROC2 over I2C and saves one CSV per trigger."""
 
     DEFAULT_CONFIG = {
         "hostname": "192.168.2.3",
@@ -40,15 +46,22 @@ class EtrocWaveform(Satellite):
         "offset": 10,
         "ws_active_channel": 0x0091,
         "output_path": "./",
+        "connect_timeout": 5.0,
+        "socket_timeout": 10.0,
     }
 
     def _send_fc_sequence(self, reg12_val: int, reg10_val: int, reg9_val: int) -> None:
-        """Helper to send a standard Fast Command hardware sequence."""
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "register_12", reg12_val)
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "register_10", reg10_val, self.prescale_factor)
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "register_9", reg9_val)
-        cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "fc_init")
-        time.sleep(0.01)
+        """Fill FC memory addresses [reg10_val, reg9_val] with the command in reg12_val."""
+        fast_command.send_fc_sequence(self.connection_socket, reg12_val, reg10_val, reg9_val, self.prescale_factor)
+
+    def _check_memo(self, memo: str) -> None:
+        """Validate a memo against the EtrocWaveform grammar."""
+        for word in memo.split():
+            if word not in _WAVEFORM_MEMO_WORDS and not _REPEATED_RE.match(word):
+                raise ValueError(
+                    f"Unknown word '{word}' in fast_command_memo '{memo}'. "
+                    f"Allowed: {sorted(_WAVEFORM_MEMO_WORDS)} and repeatedQInj=N"
+                )
 
     def _execute_fc_command(self, base_reg12: int, cmd_offset: int, base_val: int, loops: int, uniform: bool, do_loop: bool) -> None:
         """Helper to handle the initial command and its optional repeating loop."""
@@ -122,16 +135,9 @@ class EtrocWaveform(Satellite):
     def do_initializing(self, config: Configuration) -> str:
         """Configure the Satellite and any associated hardware."""
 
-        for key, default_value in self.DEFAULT_CONFIG.items():
-            # config.get() automatically sets the default if missing
-            # and pulls the value from the config file!
-            # Adding 'return_type' ensures it stays type-safe!
-            value = config.get(key, default_value, return_type=type(default_value))
-
-            # Set the variable on the class
-            setattr(self, key, value)
-
-        self.connection_socket = None
+        self._close_connection()
+        load_typed_config(self, config, self.DEFAULT_CONFIG)
+        self._check_memo(self.fast_command_memo)
 
         if self.prescale_factor not in [2048, 4096, 8192, 16384]:
             raise ValueError(f"Prescale factor must be one of [2048, 4096, 8192, 16384], {self.prescale_factor} not supported")
@@ -140,7 +146,8 @@ class EtrocWaveform(Satellite):
         return "Initialized - Configuration loaded and Defaults set"
 
     def do_launching(self) -> str:
-        # 1. Improved error reporting for socket creation/connection
+        # The I2C stack (i2c_gui2, pandas, tqdm) is only needed from here on
+        from ..EtrocCommon.new_wrapper_i2cGui2 import i2c_connection
 
         self.i2c_conn = i2c_connection(self.i2c_port, self.chip_addresses, self.ws_addresses, self.chip_names)
         self.i2c_conn.batch_PLL_FC_calibration()
@@ -149,15 +156,10 @@ class EtrocWaveform(Satellite):
         self.i2c_conn.batch_auto_calibrate_chip(pixel_list=[(0, 14)])
         self.i2c_conn.batch_enable_pixels(pixel_list=[(0, 14)], offset=self.offset)
 
-        try:
-            self.connection_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        except socket.error as e:
-            raise RuntimeError(f"Failed to create socket for EtrocTransmitter Satellite: {e}")
-
-        try:
-            self.connection_socket.connect((self.hostname, self.port))
-        except socket.error as e:
-            raise ConnectionError(f"Failed to connect to IP {self.hostname}:{self.port} - {e}")
+        self._close_connection()
+        self.connection_socket = cmd_interpret.open_socket(
+            self.hostname, self.port, self.connect_timeout, self.socket_timeout or None
+        )
 
         # 2. Cleanly map and write standard registers
         initial_registers = {
@@ -188,14 +190,7 @@ class EtrocWaveform(Satellite):
 
     def do_landing(self) -> str:
         self.configure_memo_FC(memo="Triggerbit")
-
-        # 3. Safely shutdown and close the socket without crashing if already disconnected
-        if self.connection_socket:
-            try:
-                self.connection_socket.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass # Ignore if the socket is already dead or closed
-            self.connection_socket.close()
+        self._close_connection()
 
         self.log.info("Socket shutdown and closed, Fast Command idling")
         return "Landed - Socket shutdown and closed, Fast Command idling"
@@ -282,127 +277,12 @@ class EtrocWaveform(Satellite):
 
         return "Finished acquisition"
 
-    @cscp_requestable
-    def get_config_register(self, request: CSCP1Message) -> tuple[str, Any, dict]:
-        reg = request.payload
-        return "FPGA is Ready", format(cmd_interpret.read_config_reg(self.connection_socket, reg), '016b'), {}
+    def _close_connection(self) -> None:
+        """Close the KC705 TCP connection if one is open."""
+        cmd_interpret.close_socket(getattr(self, "connection_socket", None))
+        self.connection_socket = None
 
-    @cscp_requestable
-    def get_status_register(self, request: CSCP1Message) -> tuple[str, Any, dict]:
-        reg = request.payload
-        return "FPGA is Ready", format(cmd_interpret.read_status_reg(self.connection_socket, reg), '016b'), {}
-
-    @cscp_requestable
-    def set_data_phase_delay(self, request: CSCP1Message) -> tuple[str, Any, dict]:
-        data_delay = max(0, min(request.payload, 63)) # 6 bits max
-
-        # Clear bits 7-12 (6 bits), then set them to data_delay
-        mask = ~(0x3F << 7)
-        self.timestamp = (self.timestamp & mask) | (data_delay << 7)
-
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
-        return "FPGA Reg 13 Set, Data Delay Set", f"0x{cmd_interpret.read_config_reg(self.connection_socket, 13):04x}", {}
-
-    @cscp_requestable
-    def set_data_phase_channel_delay(self, request: CSCP1Message) -> tuple[str, Any, dict]:
-        data_delay = max(0, min(request.payload[0], 39)) # Original code clamped to 39
-        channel = max(0, min(request.payload[1], 3))
-
-        shift = 0 if channel in (0, 2) else 8
-        mask = ~(0x3F << shift) # 6-bit mask
-
-        if channel < 2:
-            self.data_delays_01 = (self.data_delays_01 & mask) | (data_delay << shift)
-            cmd_interpret.write_config_reg_decoded(self.connection_socket, "data_delays_01", self.data_delays_01)
-            return "FPGA Reg 5 Set, Data Delay Set", f"0x{cmd_interpret.read_config_reg(self.connection_socket, 5):04x}", {}
-        else:
-            self.data_delays_23 = (self.data_delays_23 & mask) | (data_delay << shift)
-            cmd_interpret.write_config_reg_decoded(self.connection_socket, "data_delays_23", self.data_delays_23)
-            return "FPGA Reg 6 Set, Data Delay Set", f"0x{cmd_interpret.read_config_reg(self.connection_socket, 6):04x}", {}
-
-    @cscp_requestable
-    def set_fc_phase_delay(self, request: CSCP1Message) -> tuple[str, Any, dict]:
-        fc_delay = max(0, min(request.payload, 63))
-
-        # Clear bits 10-15 (6 bits) and set to fc_delay
-        mask = ~(0x3F << 10)
-        self.counter_duration = (self.counter_duration & mask) | (fc_delay << 10)
-
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "counter_duration", self.counter_duration)
-        return "FPGA Reg 7 Set, FC Phase Delay Set", f"0x{cmd_interpret.read_config_reg(self.connection_socket, 7):04x}", {}
-
-    @cscp_requestable
-    def set_fc_phase_channel_delay(self, request: CSCP1Message) -> tuple[str, Any, dict]:
-        fc_delay = max(0, min(request.payload[0], 31))
-        channel = max(0, min(request.payload[1], 3))
-
-        # 1. Set the 4-bit delay in fc_delays (Reg 4)
-        shift_fc = 4 * channel
-        mask_fc = ~(0xF << shift_fc)
-        self.fc_delays = (self.fc_delays & mask_fc) | ((fc_delay & 0xF) << shift_fc)
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "fc_delays", self.fc_delays)
-
-        # 2. Set the MSB (5th bit) in data_delays_01 (Reg 5)
-        msb = (fc_delay >> 4) & 0x1
-        shift_msb = {0: 6, 1: 7, 2: 14, 3: 15}.get(channel, -1)
-
-        if shift_msb != -1:
-            mask_msb = ~(1 << shift_msb)
-            self.data_delays_01 = (self.data_delays_01 & mask_msb) | (msb << shift_msb)
-            cmd_interpret.write_config_reg_decoded(self.connection_socket, "data_delays_01", self.data_delays_01)
-
-        return "FPGA Reg 4 and 5 Set, FC Phase Delay Set", [f"0x{cmd_interpret.read_config_reg(self.connection_socket, 4):04x}", f"0x{cmd_interpret.read_config_reg(self.connection_socket, 5):04x}"], {}
-
-    @cscp_requestable
-    def set_fc_bit_delay(self, request: CSCP1Message) -> tuple[str, Any, dict]:
-        bit_delay = max(0, min(request.payload, 15)) # Assuming 4 bits max based on original logic
-
-        # Clear bits 10-13 (4 bits) and set to bit_delay
-        mask = ~(0xF << 10)
-        self.polarity = (self.polarity & mask) | (bit_delay << 10)
-
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "polarity", self.polarity)
-        return "FPGA Reg 14 Set, FC Bit Delay Set", f"0x{cmd_interpret.read_config_reg(self.connection_socket, 14):04x}", {}
-
-    @cscp_requestable
-    def set_ledpage(self, request: CSCP1Message) -> tuple[str, Any, dict]:
-        ledpage = max(0, min(request.payload, 5))
-
-        # Clear bits 2-4 (3 bits) and set to ledpage
-        mask = ~(0x7 << 2)
-        self.timestamp = (self.timestamp & mask) | (ledpage << 2)
-
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
-        return "FPGA Reg 13 Set, Led Page Set", format(cmd_interpret.read_config_reg(self.connection_socket, 13), '016b'), {}
-
-    @cscp_requestable
-    def set_active_channel(self, request: CSCP1Message) -> tuple[str, Any, dict]:
-        self.active_channel = request.payload
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "active_channel", self.active_channel)
-        return "FPGA Reg 15 Set, active_channel Set", format(cmd_interpret.read_config_reg(self.connection_socket, 15), '016b'), {}
-
-    @cscp_requestable
-    def set_fast_command_memo(self, request: CSCP1Message) -> tuple[str, Any, dict]:
-        self.fast_command_memo = request.payload
-        self.configure_memo_FC()
-        return "Fast Command Configured", self.fast_command_memo, {}
-
-    # ==========================================
-    # CSCP Command Permission Checks
-    # ==========================================
-
-    def _is_orbit_state(self, request: CSCP1Message) -> bool:
-        """Helper to ensure commands are only allowed in the ORBIT state."""
-        return self.fsm.current_state.id in ["ORBIT"]
-
-    # Map the required framework permission checks to our single helper
-    _get_config_register_is_allowed = _is_orbit_state
-    _get_status_register_is_allowed = _is_orbit_state
-    _set_data_phase_delay_is_allowed = _is_orbit_state
-    _set_data_phase_channel_delay_is_allowed = _is_orbit_state
-    _set_fc_phase_delay_is_allowed = _is_orbit_state
-    _set_fc_phase_channel_delay_is_allowed = _is_orbit_state
-    _set_fc_bit_delay_is_allowed = _is_orbit_state
-    _set_ledpage_is_allowed = _is_orbit_state         # Fixed the naming bug here!
-    _set_active_channel_is_allowed = _is_orbit_state
-    _set_fast_command_memo_is_allowed = _is_orbit_state
+    def fail_gracefully(self) -> str:
+        """Release the KC705 connection when entering ERROR so a later initialize can reconnect."""
+        self._close_connection()
+        return "Failed gracefully, KC705 connection closed"

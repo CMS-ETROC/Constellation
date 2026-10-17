@@ -3,17 +3,27 @@ SPDX-FileCopyrightText: 2025 DESY and the Constellation authors
 SPDX-License-Identifier: EUPL-1.2
 """
 
-from constellation.core.commandmanager import cscp_requestable
-from constellation.core.message.cdtp2 import DataRecord
-from constellation.core.message.cscp1 import CSCP1Message
-from constellation.core.receiver_satellite import ReceiverSatellite
-from constellation.core.configuration import Configuration
-from typing import Any
+import io
+import json
+import time
 from pathlib import Path
-import numpy as np
-import io, time
+from typing import Any
 
-class EtrocReceiver(ReceiverSatellite):
+import numpy as np
+
+from constellation.core.commandmanager import cscp_requestable
+from constellation.core.configuration import Configuration
+from constellation.core.message.cdtp2 import DataRecord
+from constellation.core.monitoring import schedule_metric
+from constellation.core.protocol.cscp1 import SatelliteState
+from constellation.core.receiver_satellite import ReceiverSatellite
+
+from ..EtrocCommon import ETROC_SATELLITES_VERSION
+from ..EtrocCommon.config import load_typed_config
+
+
+class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
+    """Writes the KC705 data stream to .nem (translated) or .bin files, one directory per run."""
 
     # 1. Centralize standard configurations
     DEFAULT_CONFIG = {
@@ -54,14 +64,10 @@ class EtrocReceiver(ReceiverSatellite):
     def do_initializing(self, config: Configuration) -> str:
         """Initialize and configure the satellite."""
 
-        for key, default_value in self.DEFAULT_CONFIG.items():
-            # config.get() automatically sets the default if missing
-            # and pulls the value from the config file!
-            # Adding 'return_type' ensures it stays type-safe!
-            value = config.get(key, default_value, return_type=type(default_value))
-
-            # Set the variable on the class
-            setattr(self, key, value)
+        load_typed_config(self, config, self.DEFAULT_CONFIG)
+        self.outfile = None
+        self.data_rate = 0.0
+        self.run_bytes_received = 0
 
         # Determine file size limit (20 MB for binary, 50,000 lines for text)
         if self.translate:
@@ -106,6 +112,7 @@ class EtrocReceiver(ReceiverSatellite):
         self.file_size = 0
         self.start_time = time.time()
         self.data_rate = 0.0 # Reset saved rate
+        self.run_bytes_received = 0
         self.last_flush = time.monotonic()
         self._reset_params()
 
@@ -122,14 +129,39 @@ class EtrocReceiver(ReceiverSatellite):
         if self.outfile:
             self._close_file(self.outfile)
             self.outfile = None
-        self.log.info(f"Stopped Run {self.run_identifier}. File closed safely.")
+        run_duration = max(time.time() - self.start_time, 1e-9)
+        self.data_rate = self.run_bytes_received * 8 / run_duration / 1e9
+        self.log.info(
+            f"Stopped Run {self.run_identifier}. File closed safely. "
+            f"Received {self.run_bytes_received / 1e6:.3g} MB in {run_duration:.0f} s ({self.data_rate:.3g} Gbps)"
+        )
 
-    @cscp_requestable
-    def get_data_rate(self, request: CSCP1Message) -> tuple[str, Any, dict[str, Any]]:
+    @cscp_requestable()
+    def get_data_rate(self) -> tuple[str, Any, dict[str, Any]]:
+        """Average input data rate of the current or last run in Gbps."""
+        if self.outfile is not None:
+            run_duration = max(time.time() - self.start_time, 1e-9)
+            self.data_rate = self.run_bytes_received * 8 / run_duration / 1e9
         return f"{self.data_rate:.3g} Gbps", self.data_rate, {}
 
+    @schedule_metric("MB/s", 5, [SatelliteState.RUN])
+    def input_rate(self) -> float | None:
+        """Average rate of raw data received since the start of the run."""
+        if self.outfile is None:
+            return None
+        return self.run_bytes_received / 1e6 / max(time.time() - self.start_time, 1e-9)
+
+    def _write_run_metadata(self, kind: str, sender: str, tags: dict[str, Any], payload: dict[str, Any]) -> None:
+        """Store a BOR/EOR next to the run's data files as JSON."""
+        run_dir = Path(self.output_path) / self.run_identifier
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / f"{kind}_{sender.replace('.', '_')}.json"
+        with open(path, "w") as f:
+            json.dump({"sender": sender, "user_tags": tags, kind: payload}, f, indent=2, default=str)
+        self.log.info(f"Wrote {kind.upper()} of {sender} to {path}")
+
     def receive_bor(self, sender: str, user_tags: dict[str, Any], configuration: dict[str, Any]) -> None:
-        pass
+        self._write_run_metadata("bor", sender, user_tags, configuration)
 
     def receive_data(self, sender: str, data_record: DataRecord) -> None:
         """Called automatically by the framework every time a packet arrives."""
@@ -138,6 +170,7 @@ class EtrocReceiver(ReceiverSatellite):
 
         # DataRecords can contain multiple blocks. We loop through them to get our bytes.
         for raw_bytes in data_record.blocks:
+            self.run_bytes_received += len(raw_bytes)
 
             # 1. INSTANT DECODING (Zero-Copy)
             # We tell NumPy to lay a view over the raw bytes and treat them
@@ -151,7 +184,7 @@ class EtrocReceiver(ReceiverSatellite):
                 self._translate_and_write(payload)
 
     def receive_eor(self, sender: str, user_tags: dict[str, Any], run_metadata: dict[str, Any]) -> None:
-        pass
+        self._write_run_metadata("eor", sender, user_tags, run_metadata)
 
     def _rotate_file(self) -> None:
         """Forces a clean file rotation."""

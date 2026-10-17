@@ -95,6 +95,8 @@ hdf5 = ["h5py", "numpy"]
 influx = ["influxdb-client"]
 lecroy = ["lecrunch3>=3.0.3", "numpy"]
 visa = ["pyvisa", "pyvisa-py", "pyserial", "zeroconf"]
+# ETROC satellites: the I2C stack is needed by EtrocWaveform and by EtrocCounters scans
+etroc = ["numpy", "pandas", "tqdm", "I2C-GUI2"]
 
 [tool.meson-python.args]
 setup = ["--wrap-mode=forcefallback", "-Dimpl_py=enabled", "-Dimpl_cxx=disabled"]  # disable C++ by default

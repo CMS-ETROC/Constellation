@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+import socket
 import struct
 import warnings
 
@@ -81,19 +82,70 @@ VALID_PRESCALE_FACTORS = {
     16384: 0b11,
 }
 
+# Status register addresses served by the control interface (16-bit words 0-10 of the
+# 176-bit STATUS_REG; word n = STATUS_REG[16n+15:16n], src/control_interface.vhd).
+STATUS_REGISTER_COUNT = 11
+
+# The KC705 TCP server (COM5402, src/gig_eth/tcp_server) is built with NTCPSTREAMS = 1:
+# one client at a time. A second client is not refused, its SYN is ignored, so a
+# connect() without a timeout hangs for minutes.
+SINGLE_CLIENT_HINT = (
+    "The KC705 serves ONE TCP client at a time (firmware NTCPSTREAMS = 1). If another "
+    "program holds the connection (EtrocTransmitter, EtrocWaveform, EtrocCounters, a "
+    "notebook or an old DAQ script), land/close it first and retry."
+)
+
 # ------------------------------------------------------------------------
 # Helper Functions
 # ------------------------------------------------------------------------
 
+def open_socket(hostname, port, connect_timeout=5.0, io_timeout=None):
+    """Open the TCP connection to the KC705 with bounded waits.
+
+    connect_timeout: seconds to wait for the TCP handshake.
+    io_timeout: seconds any later send/recv may block (None = block forever).
+    Raises ConnectionError with an explanation when the board does not answer.
+    """
+    try:
+        sock = socket.create_connection((hostname, port), timeout=connect_timeout)
+    except ConnectionRefusedError as e:
+        raise ConnectionError(f"KC705 at {hostname}:{port} refused the connection ({e}). {SINGLE_CLIENT_HINT}") from e
+    except (socket.timeout, TimeoutError) as e:
+        raise ConnectionError(
+            f"KC705 at {hostname}:{port} did not complete the TCP handshake within {connect_timeout} s. "
+            f"Either the board is off/unreachable or another client holds it. {SINGLE_CLIENT_HINT}"
+        ) from e
+    except OSError as e:
+        raise ConnectionError(f"Cannot connect to KC705 at {hostname}:{port}: {e}") from e
+    sock.settimeout(io_timeout)
+    return sock
+
+def close_socket(sock):
+    """Shut down and close a socket, ignoring errors from an already dead link."""
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    sock.close()
+
 def _recv_exact(sock, num_bytes):
-    """Helper to ensure exactly num_bytes are received from the socket."""
+    """Receive exactly num_bytes; returns the bytes received so far if the peer closes."""
     data = bytearray()
     while len(data) < num_bytes:
         packet = sock.recv(num_bytes - len(data))
         if not packet:
-            return None # Connection closed
+            break  # Connection closed
         data.extend(packet)
-    return data
+    return bytes(data)
+
+def _recv_word(sock):
+    """Receive one 32-bit big-endian reply word; raise if the link closed."""
+    raw = _recv_exact(sock, 4)
+    if len(raw) != 4:
+        raise ConnectionError("KC705 closed the TCP connection while a register reply was expected")
+    return struct.unpack('>I', raw)[0]
 
 # ------------------------------------------------------------------------
 # Communication Functions
@@ -103,7 +155,7 @@ def _recv_exact(sock, num_bytes):
 # @param[in] Addr Address of the configuration register 0-31
 # @param[in] Data write into the configuration register 0-65535, [15:0]
 def write_config_reg(ss, Addr, Data):
-    data = 0x00200000 + (Addr << 16) + Data
+    data = 0x00200000 + (Addr << 16) + (Data & 0xffff)
     ss.sendall(struct.pack('>I', data))
 
 ## read config_reg
@@ -112,20 +164,22 @@ def write_config_reg(ss, Addr, Data):
 def read_config_reg(ss, Addr):
     data = 0x80200000 + (Addr << 16)
     ss.sendall(struct.pack('>I', data))
-    return struct.unpack('>I', _recv_exact(ss, 4))[0]
+    return _recv_word(ss) & 0xffff
 
 ## write pulse_reg
 # @param[in] Data write into the pulse register 0-65535
 def write_pulse_reg(ss, Data):
-    data = 0x000b0000 + Data
+    data = 0x000b0000 + (Data & 0xffff)
     ss.sendall(struct.pack('>I', data))
 
 ## read status_reg
 # @param[in] Addr Address of the configuration register 0-10
 def read_status_reg(ss, Addr):
+    if not 0 <= Addr < STATUS_REGISTER_COUNT:
+        raise ValueError(f"Status register address {Addr} outside 0-{STATUS_REGISTER_COUNT - 1}")
     data = 0x80000000 + (Addr << 16)
     ss.sendall(struct.pack('>I', data))
-    return struct.unpack('>I', _recv_exact(ss, 4))[0]
+    return _recv_word(ss) & 0xffff
 
 ## write memeoy
 # @param[in] Addr write address of memeoy 0-65535

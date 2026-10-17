@@ -6,6 +6,7 @@ SPDX-License-Identifier: EUPL-1.2
 from constellation.core.logging import setup_cli_logging
 from constellation.core.transmitter_satellite import TransmitterSatelliteArgumentParser
 
+from ..EtrocCommon import ETROC_SATELLITES_VERSION
 from .EtrocTransmitter import EtrocTransmitter
 
 
@@ -13,7 +14,7 @@ def main(args=None):
     """EtrocTransmitter satellite"""
 
     # Get a dict of the parsed arguments
-    parser = TransmitterSatelliteArgumentParser(description=main.__doc__)
+    parser = TransmitterSatelliteArgumentParser(description=main.__doc__, version=ETROC_SATELLITES_VERSION)
     args = vars(parser.parse_args(args))
 
     # Set up logging
