@@ -27,7 +27,17 @@ ORBIT = [SatelliteState.ORBIT]
 
 
 class KC705RegisterCommands:
-    """CSCP commands to read and tune KC705 configuration registers."""
+    """CSCP commands to read and tune KC705 configuration registers.
+
+    Also the register writes of the launch path, shared with reconfigure.
+    """
+
+    # Config registers written at launch from the satellite attributes of the same name, in this order
+    LAUNCH_REGISTERS = (
+        "active_channel", "timestamp", "triggerbit_delay", "polarity",
+        "counter_duration", "fc_delays", "data_delays_01", "data_delays_23",
+    )
+    PRESCALE_FACTORS = (2048, 4096, 8192, 16384)
 
     @cscp_requestable(ORBIT)
     def get_config_register(self, reg: int) -> tuple[str, Any, dict]:
@@ -134,3 +144,43 @@ class KC705RegisterCommands:
     def _check_memo(self, memo: str) -> None:
         """Validate a memo against the satellite's grammar (EtrocTransmitter grammar by default)."""
         fast_command.parse_memo(memo)
+
+    # ------------------------------------------------------------- launch path
+    def _write_registers(self, names) -> None:
+        """Write the named config registers from the satellite attributes of the same name."""
+        for name in names:
+            cmd_interpret.write_config_reg_decoded(self.connection_socket, name, getattr(self, name))
+
+    def _write_prescale(self) -> None:
+        """Reg10 prescale bits (the FC memory writes carry them as well)."""
+        cmd_interpret.write_config_reg_decoded(self.connection_socket, "register_10", 0x000, self.prescale_factor)
+
+    def _validate_kc705_settings(self, values: dict[str, Any]) -> None:
+        """Check prescale_factor and fast_command_memo if present (initialize and reconfigure)."""
+        if "prescale_factor" in values and values["prescale_factor"] not in self.PRESCALE_FACTORS:
+            raise ValueError(
+                f"Prescale factor must be one of {list(self.PRESCALE_FACTORS)}, {values['prescale_factor']} not supported"
+            )
+        if "fast_command_memo" in values:
+            self._check_memo(values["fast_command_memo"])
+
+    def _reconfigure_kc705(self, plan: dict[str, Any]) -> list[str]:
+        """Apply reconfigured keys the way do_launching does; registers are read back. Returns the changes."""
+        for key, value in plan.items():
+            setattr(self, key, value)
+        registers = [name for name in self.LAUNCH_REGISTERS if name in plan]
+        self._write_registers(registers)
+        changes = []
+        for name in registers:
+            reg = cmd_interpret.CONFIG_REGISTERS[name]
+            readback = cmd_interpret.read_config_reg(self.connection_socket, reg)
+            changes.append(f"{name} = 0x{getattr(self, name):04x} (Reg{reg} read back 0x{readback:04x})")
+        if "prescale_factor" in plan:
+            self._write_prescale()
+            changes.append(f"prescale_factor = {self.prescale_factor}")
+        if "fast_command_memo" in plan or "prescale_factor" in plan:
+            self.configure_memo_FC()
+            changes.append(f"FC memory reprogrammed from '{self.fast_command_memo}'")
+        handled = set(registers) | {"prescale_factor", "fast_command_memo"}
+        changes += [f"{key} = {value!r}" for key, value in plan.items() if key not in handled]
+        return changes

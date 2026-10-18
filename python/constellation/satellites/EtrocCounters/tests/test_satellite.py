@@ -259,6 +259,14 @@ def test_configuration_from_default_alone_is_refused(setup):
     assert "no [EtrocCounters.Test] section reached this satellite" in sat.fsm.status
 
 
+
+def test_configuration_from_default_alone_is_refused(setup):
+    sat, tx, fake, _, _ = setup
+    call(tx, "initialize", {"hostname": "127.0.0.1", "port": fake.port})
+    wait_state(sat, SatelliteState.ERROR)
+    assert "no [EtrocCounters.Test] section reached this satellite" in sat.fsm.status
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -298,3 +306,44 @@ def test_unreachable_board_fails_launch_with_hint(setup):
     call(tx, "launch")
     wait_state(sat, SatelliteState.ERROR)
     assert "ONE TCP client" in sat.fsm.status
+
+
+def test_reconfigure_writes_registers_and_switches_channel(setup):
+    sat, tx, fake, _, config = setup
+    launch(sat, tx, config)
+    with fake.lock:
+        mark = len(fake.received)
+    rep = call(tx, "reconfigure", {"kc705_registers": {"triggerbit_delay": 0x1900}})
+    assert rep.verb_type == OK, rep.verb_msg
+    wait_state(sat, SatelliteState.ORBIT)
+    sat._link.read_config(8)  # round trip: the fake has handled every write sent before it
+    with fake.lock:
+        writes = [m for m in fake.received[mark:] if m[0] in ("write_config", "pulse")]
+    assert writes == [("write_config", 8, 0x1900)]
+    assert sat._config._dictionary["kc705_registers"]["triggerbit_delay"] == 0x1900
+
+    assert call(tx, "reconfigure", {"channel": 2}).verb_type == OK
+    wait_state(sat, SatelliteState.ORBIT)
+    assert sat._reader.get_channel() == 2
+    assert sat._config._dictionary["channel"] == 2
+    assert call(tx, "read_counters").payload["channel"] == 2
+
+
+
+@pytest.mark.parametrize(
+    "change, word",
+    [
+        ({"output_path": "/elsewhere"}, "'output_path'"),
+        ({"kc705_registers": {"counter_duration": 5}}, "counter_duration"),
+        ({"channel": 7}, "channel must be 0-3"),
+    ],
+)
+def test_refused_reconfigure_stays_in_orbit(setup, change, word):
+    sat, tx, _, _, config = setup
+    launch(sat, tx, config)
+    rep = call(tx, "reconfigure", change)
+    assert rep.verb_type != OK
+    assert word in rep.verb_msg, rep.verb_msg
+    time.sleep(0.2)
+    assert sat.fsm.state == SatelliteState.ORBIT
+

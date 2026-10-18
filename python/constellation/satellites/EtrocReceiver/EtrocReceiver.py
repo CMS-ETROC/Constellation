@@ -20,10 +20,11 @@ from constellation.core.receiver_satellite import ReceiverSatellite
 
 from ..EtrocCommon import ETROC_SATELLITES_VERSION
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.reconfigure import EtrocReconfigure
 from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 
 
-class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
+class EtrocReceiver(EtrocReconfigure, ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
     """Writes the KC705 data stream to .nem (translated) or .bin files, one directory per run."""
 
     REQUIRED_KEYS = REQUIRED_KEYS["EtrocReceiver"]
@@ -36,6 +37,9 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
         "keep_time": 1,
         "flush_interval": 10.0,
     }
+
+    # Keys `reconfigure` may change in ORBIT (no file is open there); output_path needs a landing.
+    RECONFIGURABLE_KEYS = ("translate", "skip_fillers", "keep_time", "flush_interval")
 
     # 2. Define static hardware patterns at the class level
     FIXED_PATTERNS = {
@@ -76,11 +80,7 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
         self.run_identifier = None
         self.run_sender = None
 
-        # Determine file size limit (20 MB for binary, 50,000 lines for text)
-        if self.translate:
-            self.file_size_limit = 50000       # 50,000 lines for .nem text
-        else:
-            self.file_size_limit = 20 * 10**6  # 20 MB for raw .bin
+        self._set_file_size_limit()
 
         # Running variables used during run/write loop
         self.file_counter = 0
@@ -97,6 +97,13 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
         self._reset_params()
 
         return "Configured ETROC2Receiver"
+
+    def _set_file_size_limit(self) -> None:
+        """File rotation limit: 50,000 lines for translated .nem text, 20 MB for raw .bin."""
+        if self.translate:
+            self.file_size_limit = 50000
+        else:
+            self.file_size_limit = 20 * 10**6
 
     def _reset_params(self) -> None:
         """Helper to reset running state variables between events."""
@@ -466,6 +473,17 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
                 )
             except OSError as e:
                 self.log.warning(f"Could not write {marker}: {e}")
+
+    # ------------------------------------------------------------- reconfigure
+    def _validate_settings(self, values: dict[str, Any]) -> None:
+        """No value checks beyond the types, as at initialize."""
+
+    def _apply_reconfigure(self, plan: dict[str, Any]) -> list[str]:
+        for key, value in plan.items():
+            setattr(self, key, value)
+        if "translate" in plan:
+            self._set_file_size_limit()
+        return [f"{key} = {value!r}" for key, value in plan.items()]
 
     def fail_gracefully(self) -> str:
         """Close the data file on entering ERROR so the data written so far is complete on disk."""

@@ -126,3 +126,20 @@ and comments.
   files hold events; for high rates use `translate = 0` (raw `.bin`, translated offline),
   since the translation runs in Python per word.
 - FC memos are validated: unknown words are rejected instead of ignored.
+- `reconfigure` (ORBIT only) takes a dictionary of keys and applies them through the
+  launch code: register keys are written and read back (the reply lists e.g.
+  `polarity = 0x4123 (Reg14 read back 0x4123)`), a new `fast_command_memo` or
+  `prescale_factor` reprograms the FC memory, and the next BOR's `kc705_readback` shows
+  the new values. Keys that need a landing (connection, I2C and chip identity,
+  `output_path`) are refused with "'key' cannot change in ORBIT; land and re-initialize to
+  change it", and keys the initialize configuration did not hold, or of another type, are
+  refused too; a refused reconfigure is a failed command and the satellite stays in
+  ORBIT. Changeable keys:
+
+  | Type | Keys |
+  |---|---|
+  | EtrocTransmitter | `active_channel`, `timestamp`, `triggerbit_delay`, `polarity`, `counter_duration`, `fc_delays`, `data_delays_01`, `data_delays_23`, `prescale_factor`, `fast_command_memo`, `num_fifo_read`, `clear_fifo`, `reset_counter`, `firmware` |
+  | EtrocWaveform | the EtrocTransmitter keys, `ws_active_channel`, `active_boards` |
+  | EtrocReceiver | `translate`, `skip_fillers`, `keep_time`, `flush_interval` (takes effect at the next start) |
+  | EtrocCounters | `channel`, `fc_mode_on_launch`, `prescale_factor`, `check_layout`, `settle_windows`, `l1a_delay`, the `kc705_registers` section (keys present at initialize); refused while a scan runs |
+

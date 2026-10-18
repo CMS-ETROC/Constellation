@@ -29,6 +29,7 @@ from constellation.core.satellite import Satellite
 
 from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.reconfigure import EtrocReconfigure
 from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 from .chipio import POWER_MODES
 from .counters import (
@@ -73,7 +74,7 @@ def _scan_params(params: dict | str) -> dict:
     return params
 
 
-class EtrocCounters(Satellite, version=ETROC_SATELLITES_VERSION):
+class EtrocCounters(EtrocReconfigure, Satellite, version=ETROC_SATELLITES_VERSION):
     """KC705 counter readout (data, header, trigger-bit, coincidence per 1 s window) and threshold scans."""
 
     REQUIRED_KEYS = REQUIRED_KEYS["EtrocCounters"]
@@ -98,6 +99,12 @@ class EtrocCounters(Satellite, version=ETROC_SATELLITES_VERSION):
         "power_mode": "high",
         "l1a_delay": QINJ_L1A_SPACING_DEFAULT_DELAY,
     }
+
+    # Keys `reconfigure` may change in ORBIT (not while a scan runs). The connection, the I2C
+    # adapter and chip, the output directory and firmware_window_s (reader and poller timing,
+    # built at launch) need a landing.
+    RECONFIGURABLE_KEYS = ("channel", "fc_mode_on_launch", "prescale_factor", "check_layout", "settle_windows", "l1a_delay")
+    RECONFIGURABLE_SECTIONS = ("kc705_registers",)
 
     def __init__(self, *args: Any, **kwargs: Any):
         self._link: KC705Link | None = None
@@ -127,41 +134,54 @@ class EtrocCounters(Satellite, version=ETROC_SATELLITES_VERSION):
             raise RuntimeError("A scan thread is still running; cannot re-initialize")
         self._release()
         self._effective_config = load_typed_config(self, config, self.DEFAULT_CONFIG, extra_keys=("kc705_registers",))
+        self._validate_settings(self._effective_config)
+        self._warn_l1a_delay()
 
-        if not 0 <= self.channel <= 3:
-            raise ValueError(f"channel must be 0-3, got {self.channel}")
-        if self.prescale_factor not in PRESCALE_FACTORS:
-            raise ValueError(f"prescale_factor must be one of {PRESCALE_FACTORS}, got {self.prescale_factor}")
-        self._parse_fc_mode(self.fc_mode_on_launch)
-        if self.settle_windows < 2:
+        self.kc705_registers: dict[str, int] = self._plan_sections(config).get("kc705_registers", {})
+        self._effective_config["kc705_registers"] = dict(self.kc705_registers)
+        return "Initialized"
+
+    def _validate_settings(self, values: dict[str, Any]) -> None:
+        """Value checks of the keys present (initialize: all; reconfigure: the changed ones)."""
+        if "channel" in values and not 0 <= values["channel"] <= 3:
+            raise ValueError(f"channel must be 0-3, got {values['channel']}")
+        if "prescale_factor" in values and values["prescale_factor"] not in PRESCALE_FACTORS:
+            raise ValueError(f"prescale_factor must be one of {PRESCALE_FACTORS}, got {values['prescale_factor']}")
+        if "fc_mode_on_launch" in values:
+            self._parse_fc_mode(values["fc_mode_on_launch"])
+        if "settle_windows" in values and values["settle_windows"] < 2:
             raise ValueError("settle_windows must be >= 2: the first window after a change can be partial")
-        if self.chip_setup not in ("none", "basic"):
+        if "chip_setup" in values and values["chip_setup"] not in ("none", "basic"):
             raise ValueError("chip_setup must be 'none' or 'basic'")
-        if self.power_mode not in POWER_MODES:
-            raise ValueError(f"power_mode must be one of {POWER_MODES}, got '{self.power_mode}'")
-        if self.firmware_window_s <= 0:
+        if "power_mode" in values and values["power_mode"] not in POWER_MODES:
+            raise ValueError(f"power_mode must be one of {POWER_MODES}, got '{values['power_mode']}'")
+        if "firmware_window_s" in values and values["firmware_window_s"] <= 0:
             raise ValueError("firmware_window_s must be > 0")
-        if self.connect_timeout <= 0 or self.socket_timeout <= 0:
+        if values.get("connect_timeout", 1.0) <= 0 or values.get("socket_timeout", 1.0) <= 0:
             # without a timeout a dead link blocks a register read forever, and landing waits on it
             raise ValueError("connect_timeout and socket_timeout must be > 0")
+
+    def _warn_l1a_delay(self) -> None:
         if self.l1a_delay != QINJ_L1A_SPACING_DEFAULT_DELAY:
             self.log.warning(
                 f"l1a_delay 0x{self.l1a_delay:03x} differs from 0x{QINJ_L1A_SPACING_DEFAULT_DELAY:03x}, the value "
                 f"used with the qinj_l1a pattern (QInj at BX 0x005, L1A at BX 0x1fd)"
             )
 
-        self.kc705_registers: dict[str, int] = {}
-        if config.has("kc705_registers"):
-            section = config.get_section("kc705_registers")
-            for key in section.get_keys():
-                if key not in WRITABLE_REGISTERS:
-                    raise ValueError(
-                        f"kc705_registers.{key} is not allowed; EtrocCounters writes only {WRITABLE_REGISTERS} "
-                        f"(never Reg7 / counter_duration)"
-                    )
-                self.kc705_registers[key] = section.get_int(key)
-        self._effective_config["kc705_registers"] = dict(self.kc705_registers)
-        return "Initialized"
+    def _plan_sections(self, config: Configuration) -> dict[str, Any]:
+        """The kc705_registers section as {register: value}; only WRITABLE_REGISTERS (never Reg7)."""
+        if not config.has("kc705_registers"):
+            return {}
+        registers: dict[str, int] = {}
+        section = config.get_section("kc705_registers")
+        for key in section.get_keys():
+            if key not in WRITABLE_REGISTERS:
+                raise ValueError(
+                    f"kc705_registers.{key} is not allowed; EtrocCounters writes only {WRITABLE_REGISTERS} "
+                    f"(never Reg7 / counter_duration)"
+                )
+            registers[key] = section.get_int(key)
+        return {"kc705_registers": registers}
 
     def do_launching(self) -> str:
         self._link = KC705Link(self.hostname, self.port, self.connect_timeout, self.socket_timeout)
@@ -177,9 +197,7 @@ class EtrocCounters(Satellite, version=ETROC_SATELLITES_VERSION):
         else:
             self.log.info("Status-word layout check passed (page 2 fixed patterns)")
 
-        for name, value in self.kc705_registers.items():
-            self._link.write_named_config(name, value)
-            self.log.info(f"KC705 {name} (Reg{cmd_interpret.CONFIG_REGISTERS[name]}) = 0x{value:04x}")
+        self._write_kc705_registers(self.kc705_registers)
 
         self._reader.set_channel(self.channel)
         self._apply_fc_mode(self.fc_mode_on_launch)
@@ -301,6 +319,39 @@ class EtrocCounters(Satellite, version=ETROC_SATELLITES_VERSION):
         self._idle_fc_quietly("failure")
         self._release()
         return "Failed gracefully, fast commands idle, KC705 connection closed"
+
+    # ------------------------------------------------------------ reconfigure
+    def _check_reconfigure_allowed(self) -> None:
+        self._refuse_while_scanning()
+
+    def _apply_reconfigure(self, plan: dict[str, Any]) -> list[str]:
+        changes = []
+        for key, value in plan.items():
+            if key != "kc705_registers":
+                setattr(self, key, value)
+                self._effective_config[key] = value
+        if "kc705_registers" in plan:
+            self.kc705_registers.update(plan["kc705_registers"])
+            self._effective_config["kc705_registers"] = dict(self.kc705_registers)
+            self._write_kc705_registers(plan["kc705_registers"])
+            changes += [f"kc705_registers.{k} = 0x{v:04x}" for k, v in plan["kc705_registers"].items()]
+        if "channel" in plan:
+            self._reader.set_channel(self.channel)
+            self._mark_change()
+            changes.append(f"channel = {self.channel}")
+        if "fc_mode_on_launch" in plan or "prescale_factor" in plan:
+            # a new prescale factor reaches the board with the next FC memory programming
+            mode = plan.get("fc_mode_on_launch", self._fc_mode)
+            self._apply_fc_mode(mode)
+            changes.append(f"FC {self._fc_mode} (prescale {self.prescale_factor})")
+        if self._engine is not None:
+            self._engine.settle_windows = self.settle_windows
+            self._engine.l1a_delay = self.l1a_delay
+        if "l1a_delay" in plan:
+            self._warn_l1a_delay()
+        handled = {"kc705_registers", "channel", "fc_mode_on_launch", "prescale_factor"}
+        changes += [f"{k} = {v!r}" for k, v in plan.items() if k not in handled]
+        return changes
 
     # --------------------------------------------------------------- commands
     @cscp_requestable(unpack_list=False)
@@ -607,6 +658,11 @@ class EtrocCounters(Satellite, version=ETROC_SATELLITES_VERSION):
             if f is not None:
                 f.close()
         self._run_files = {}
+
+    def _write_kc705_registers(self, registers: dict[str, int]) -> None:
+        for name, value in registers.items():
+            self._link.write_named_config(name, value)
+            self.log.info(f"KC705 {name} (Reg{cmd_interpret.CONFIG_REGISTERS[name]}) = 0x{value:04x}")
 
     def _release(self) -> None:
         """Close chip and link; never while a scan thread may still use them."""

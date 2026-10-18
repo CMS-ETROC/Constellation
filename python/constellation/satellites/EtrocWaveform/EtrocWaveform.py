@@ -6,6 +6,7 @@ SPDX-License-Identifier: EUPL-1.2
 import re
 import time
 from pathlib import Path
+from typing import Any
 
 from constellation.core.configuration import Configuration
 from constellation.core.satellite import Satellite
@@ -13,13 +14,14 @@ from constellation.core.satellite import Satellite
 from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
 from ..EtrocCommon.commands import KC705RegisterCommands
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.reconfigure import EtrocReconfigure
 from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 
 _WAVEFORM_MEMO_WORDS = {"QInj", "L1A", "L1ARange", "BCR", "Triggerbit", "Start", "uniform"}
 _REPEATED_RE = re.compile(r"^repeatedQInj(=\d+)?$")
 
 
-class EtrocWaveform(KC705RegisterCommands, Satellite, version=ETROC_SATELLITES_VERSION):
+class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, Satellite, version=ETROC_SATELLITES_VERSION):
     """Waveform-sampler readout: configures the ETROC2 over I2C and saves one CSV per trigger."""
 
     REQUIRED_KEYS = REQUIRED_KEYS["EtrocWaveform"]
@@ -52,6 +54,14 @@ class EtrocWaveform(KC705RegisterCommands, Satellite, version=ETROC_SATELLITES_V
         "connect_timeout": 5.0,
         "socket_timeout": 10.0,
     }
+
+    # Keys `reconfigure` may change in ORBIT. The connection, the I2C adapter and chips (set up at
+    # launch: calibration, pixel offset) and the output directory need a landing.
+    RECONFIGURABLE_KEYS = (
+        *KC705RegisterCommands.LAUNCH_REGISTERS,
+        "prescale_factor", "fast_command_memo", "ws_active_channel",
+        "num_fifo_read", "clear_fifo", "reset_counter", "firmware", "active_boards",
+    )
 
     def _send_fc_sequence(self, reg12_val: int, reg10_val: int, reg9_val: int) -> None:
         """Fill FC memory addresses [reg10_val, reg9_val] with the command in reg12_val."""
@@ -140,11 +150,8 @@ class EtrocWaveform(KC705RegisterCommands, Satellite, version=ETROC_SATELLITES_V
 
         self._close_connection()
         self._close_i2c()
-        load_typed_config(self, config, self.DEFAULT_CONFIG)
-        self._check_memo(self.fast_command_memo)
-
-        if self.prescale_factor not in [2048, 4096, 8192, 16384]:
-            raise ValueError(f"Prescale factor must be one of [2048, 4096, 8192, 16384], {self.prescale_factor} not supported")
+        effective = load_typed_config(self, config, self.DEFAULT_CONFIG)
+        self._validate_settings(effective)
 
         self.log.info("Configuration loaded and Defaults set")
         return "Initialized - Configuration loaded and Defaults set"
@@ -168,23 +175,8 @@ class EtrocWaveform(KC705RegisterCommands, Satellite, version=ETROC_SATELLITES_V
             self.hostname, self.port, self.connect_timeout, self.socket_timeout or None
         )
 
-        # 2. Cleanly map and write standard registers
-        initial_registers = {
-            "active_channel": self.active_channel,
-            "timestamp": self.timestamp,
-            "triggerbit_delay": self.triggerbit_delay,
-            "polarity": self.polarity,
-            "counter_duration": self.counter_duration,
-            "fc_delays": self.fc_delays,
-            "data_delays_01": self.data_delays_01,
-            "data_delays_23": self.data_delays_23
-        }
-
-        for reg_name, value in initial_registers.items():
-            cmd_interpret.write_config_reg_decoded(self.connection_socket, reg_name, value)
-
-        # Write special-case register
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "register_10", 0x000, self.prescale_factor)
+        self._write_registers(self.LAUNCH_REGISTERS)
+        self._write_prescale()
 
         if self.clear_fifo:
             self.log.info("Clearing FIFO...")
@@ -299,6 +291,13 @@ class EtrocWaveform(KC705RegisterCommands, Satellite, version=ETROC_SATELLITES_V
                 conn.close()
             except Exception as e:
                 self.log.warning(f"Closing the I2C adapter failed: {e}")
+
+    # ------------------------------------------------------------- reconfigure
+    def _validate_settings(self, values: dict[str, Any]) -> None:
+        self._validate_kc705_settings(values)
+
+    def _apply_reconfigure(self, plan: dict[str, Any]) -> list[str]:
+        return self._reconfigure_kc705(plan)
 
     def fail_gracefully(self) -> str:
         """Release the KC705 connection and the I2C adapter so a later initialize can reconnect."""

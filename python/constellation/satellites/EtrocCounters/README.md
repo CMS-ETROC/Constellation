@@ -222,6 +222,11 @@ be `[EtrocCounters.<name>]` (Constellation 1.x), see `example_counters.toml`, an
 error names the expected section. `python -m constellation.satellites.EtrocCommon.check_toml
 file.toml` checks a file before it is loaded (see `EtrocCommon/README.md`).
 
+In ORBIT, `reconfigure` changes `channel`, `fc_mode_on_launch`, `prescale_factor`,
+`check_layout`, `settle_windows`, `l1a_delay` and the `kc705_registers` keys set at
+initialize, without a landing (refused while a scan runs). Other keys are refused with
+"land and re-initialize to change it" and the satellite stays in ORBIT.
+
 ## First test on hardware (checklist)
 
 1. Land EtrocTransmitter / EtrocWaveform; nothing else holds the KC705 socket or the USB-ISS.

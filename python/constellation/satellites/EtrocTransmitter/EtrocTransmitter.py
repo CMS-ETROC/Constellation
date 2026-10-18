@@ -12,10 +12,11 @@ from constellation.core.transmitter_satellite import TransmitterSatellite
 from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
 from ..EtrocCommon.commands import KC705RegisterCommands
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.reconfigure import EtrocReconfigure
 from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 
 
-class EtrocTransmitter(KC705RegisterCommands, TransmitterSatellite, version=ETROC_SATELLITES_VERSION):
+class EtrocTransmitter(KC705RegisterCommands, EtrocReconfigure, TransmitterSatellite, version=ETROC_SATELLITES_VERSION):
     """Reads the KC705 data FIFO over TCP and sends it as CDTP data records."""
 
     REQUIRED_KEYS = REQUIRED_KEYS["EtrocTransmitter"]
@@ -43,6 +44,12 @@ class EtrocTransmitter(KC705RegisterCommands, TransmitterSatellite, version=ETRO
         "socket_timeout": 60.0,
     }
 
+    # Keys `reconfigure` may change in ORBIT; the connection keys need a landing.
+    RECONFIGURABLE_KEYS = (
+        *KC705RegisterCommands.LAUNCH_REGISTERS,
+        "prescale_factor", "fast_command_memo", "num_fifo_read", "clear_fifo", "reset_counter", "firmware",
+    )
+
     def configure_memo_FC(self, memo=None) -> None:
         """Program the FC memory from a memo string (grammar in EtrocCommon.fast_command)."""
         memo_str = memo if memo is not None else self.fast_command_memo
@@ -52,12 +59,9 @@ class EtrocTransmitter(KC705RegisterCommands, TransmitterSatellite, version=ETRO
         """Configure the Satellite and any associated hardware."""
 
         self._close_connection()
-        load_typed_config(self, config, self.DEFAULT_CONFIG)
-
-        if self.prescale_factor not in [2048, 4096, 8192, 16384]:
-            raise ValueError(f"Prescale factor must be one of [2048, 4096, 8192, 16384], {self.prescale_factor} not supported")
-        # Reject a malformed memo before any hardware access
-        fast_command.parse_memo(self.fast_command_memo)
+        effective = load_typed_config(self, config, self.DEFAULT_CONFIG)
+        # Reject a bad prescale factor or a malformed memo before any hardware access
+        self._validate_settings(effective)
 
         self.log.info("Configuration loaded and Defaults set")
         return "Initialized - Configuration loaded and Defaults set"
@@ -68,23 +72,8 @@ class EtrocTransmitter(KC705RegisterCommands, TransmitterSatellite, version=ETRO
             self.hostname, self.port, self.connect_timeout, self.socket_timeout or None
         )
 
-        # 2. Cleanly map and write standard registers
-        initial_registers = {
-            "active_channel": self.active_channel,
-            "timestamp": self.timestamp,
-            "triggerbit_delay": self.triggerbit_delay,
-            "polarity": self.polarity,
-            "counter_duration": self.counter_duration,
-            "fc_delays": self.fc_delays,
-            "data_delays_01": self.data_delays_01,
-            "data_delays_23": self.data_delays_23
-        }
-
-        for reg_name, value in initial_registers.items():
-            cmd_interpret.write_config_reg_decoded(self.connection_socket, reg_name, value)
-
-        # Write special-case register
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "register_10", 0x000, self.prescale_factor)
+        self._write_registers(self.LAUNCH_REGISTERS)
+        self._write_prescale()
 
         if self.clear_fifo:
             self.log.info("Clearing FIFO...")
@@ -213,6 +202,13 @@ class EtrocTransmitter(KC705RegisterCommands, TransmitterSatellite, version=ETRO
         """Close the KC705 TCP connection if one is open."""
         cmd_interpret.close_socket(getattr(self, "connection_socket", None))
         self.connection_socket = None
+
+    # ------------------------------------------------------------- reconfigure
+    def _validate_settings(self, values: dict[str, Any]) -> None:
+        self._validate_kc705_settings(values)
+
+    def _apply_reconfigure(self, plan: dict[str, Any]) -> list[str]:
+        return self._reconfigure_kc705(plan)
 
     def fail_gracefully(self) -> str:
         """Release the KC705 connection when entering ERROR so a later initialize can reconnect."""
