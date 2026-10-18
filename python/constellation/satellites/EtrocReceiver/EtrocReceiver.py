@@ -64,10 +64,14 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
     def do_initializing(self, config: Configuration) -> str:
         """Initialize and configure the satellite."""
 
+        self._close_output("re-initialize")
         load_typed_config(self, config, self.DEFAULT_CONFIG)
         self.outfile = None
         self.data_rate = 0.0
         self.run_bytes_received = 0
+        self.start_time = None
+        self.run_identifier = None
+        self.run_sender = None
 
         # Determine file size limit (20 MB for binary, 50,000 lines for text)
         if self.translate:
@@ -113,6 +117,7 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
         self.start_time = time.time()
         self.data_rate = 0.0 # Reset saved rate
         self.run_bytes_received = 0
+        self.run_sender = None
         self.last_flush = time.monotonic()
         self._reset_params()
 
@@ -129,6 +134,9 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
         if self.outfile:
             self._close_file(self.outfile)
             self.outfile = None
+        if self.start_time is None:
+            self.log.info("Stopping without a started run")
+            return
         run_duration = max(time.time() - self.start_time, 1e-9)
         self.data_rate = self.run_bytes_received * 8 / run_duration / 1e9
         self.log.info(
@@ -139,6 +147,8 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
     @cscp_requestable()
     def get_data_rate(self) -> tuple[str, Any, dict[str, Any]]:
         """Average input data rate of the current or last run in Gbps."""
+        if getattr(self, "start_time", None) is None:
+            return "No run yet", 0.0, {}
         if self.outfile is not None:
             run_duration = max(time.time() - self.start_time, 1e-9)
             self.data_rate = self.run_bytes_received * 8 / run_duration / 1e9
@@ -160,13 +170,27 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
             json.dump({"sender": sender, "user_tags": tags, kind: payload}, f, indent=2, default=str)
         self.log.info(f"Wrote {kind.upper()} of {sender} to {path}")
 
+    def _check_sender(self, sender: str) -> None:
+        """One transmitter per receiver: two KC705 streams in one file cannot be told apart."""
+        if self.run_sender is None:
+            self.run_sender = sender
+        elif sender != self.run_sender:
+            raise RuntimeError(
+                f"{type(self).__name__} already receives from {self.run_sender}; {sender} also sent data. "
+                f"One file cannot hold two KC705 streams: restrict the receiver with "
+                f'`[{type(self).__name__}.{self.name}._data] receive_from = ["{self.run_sender}"]` '
+                f"or use one receiver per transmitter."
+            )
+
     def receive_bor(self, sender: str, user_tags: dict[str, Any], configuration: dict[str, Any]) -> None:
+        self._check_sender(sender)
         self._write_run_metadata("bor", sender, user_tags, configuration)
 
     def receive_data(self, sender: str, data_record: DataRecord) -> None:
         """Called automatically by the framework every time a packet arrives."""
         if not self.outfile:
             return  # Safety check: drop data if the file isn't open yet
+        self._check_sender(sender)
 
         # DataRecords can contain multiple blocks. We loop through them to get our bytes.
         for raw_bytes in data_record.blocks:
@@ -182,6 +206,10 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
                 self._write_untranslated(payload)
             else:
                 self._translate_and_write(payload)
+
+        if self.flush_interval > 0 and time.monotonic() - self.last_flush >= self.flush_interval:
+            self.outfile.flush()
+            self.last_flush = time.monotonic()
 
     def receive_eor(self, sender: str, user_tags: dict[str, Any], run_metadata: dict[str, Any]) -> None:
         self._write_run_metadata("eor", sender, user_tags, run_metadata)
@@ -380,6 +408,13 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
                     self._reset_params()
                     output_buffer.append("BROKEN EVENT... How did we get here?...")
 
+        # Between events (fillers only) the line limit applies as well, so a quiet run with
+        # skip_fillers = 0 does not grow one file without bound
+        if output_buffer and not self.translate_state[0] and self.file_size + len(output_buffer) >= self.file_size_limit:
+            self.outfile.write("\n".join(output_buffer) + "\n")
+            self._rotate_file()
+            output_buffer.clear()
+
         # BULLET 2: Flush the entire buffer to the hard drive in one single I/O operation
         if output_buffer:
             self.outfile.write("\n".join(output_buffer) + "\n")
@@ -411,3 +446,25 @@ class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
         if outfile and not outfile.closed:
             outfile.flush()
             outfile.close()
+
+    def _close_output(self, reason: str) -> None:
+        """Close an open data file and leave a marker that the run did not end with a stop."""
+        outfile = getattr(self, "outfile", None)
+        if outfile is None:
+            return
+        self._close_file(outfile)
+        self.outfile = None
+        if getattr(self, "run_identifier", None):
+            marker = Path(self.output_path) / self.run_identifier / "RUN_NOT_STOPPED_CLEANLY.txt"
+            try:
+                marker.write_text(
+                    f"{time.strftime('%Y-%m-%dT%H:%M:%S')} data file closed by {reason}; "
+                    f"{self.run_bytes_received} bytes received, last file index {self.file_counter}\n"
+                )
+            except OSError as e:
+                self.log.warning(f"Could not write {marker}: {e}")
+
+    def fail_gracefully(self) -> str:
+        """Close the data file on entering ERROR so the data written so far is complete on disk."""
+        self._close_output("failure")
+        return "Failed gracefully, data file closed"
