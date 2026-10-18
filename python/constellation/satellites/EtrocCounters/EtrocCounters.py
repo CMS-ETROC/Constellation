@@ -244,8 +244,8 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
             fc_idle = run_step(log, "Idling the fast commands (landing)", self._apply_fc_mode, "idle")
             if not fc_idle:
                 failed.append("FC idle")
-            log.info(f"Reading Reg{FENCE_REGISTER} back to confirm the FC idle (waits up to {link.io_timeout} s)")
-            answered = run_step(log, "Reading back Reg%d after the FC idle (landing)" % FENCE_REGISTER, link.read_config, FENCE_REGISTER)
+            self._log_wait(link.io_timeout or 0.0, "each read of the Reg13 / status page 2 read-back", "info")
+            answered = run_step(log, "Reading back Reg13 and status page 2 after the FC idle (landing)", self._fence)
         released = run_step(log, "Releasing KC705 and I2C (landing)", self._release)
         return "Landed - " + shutdown_text(
             ["fast commands idle"] if fc_idle else [], answered, failed,
@@ -341,13 +341,43 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         poller = self._poller
         if poller is None or poller is threading.current_thread():
             return
-        self.log.info(f"Waiting up to {QUIESCE_IO_TIMEOUT_S} s for the counter poller to stop")
+        self._log_wait(QUIESCE_IO_TIMEOUT_S, "the counter poller to stop", "info")
         poller.join(timeout=QUIESCE_IO_TIMEOUT_S)
         if poller.is_alive():
             self._release_run_thread_io()
             poller.join(timeout=self.RELEASE_JOIN_TIMEOUT_S)
         if not poller.is_alive():
             self._poller = None
+
+    def _fence(self) -> None:
+        """Reads whose answers are known, after the shutdown writes; raises if a reply is not the expected one.
+
+        Selects status page 2 (Reg13 read-modify-write), reads Reg13 back and compares, then reads
+        the page's fixed patterns (word 6 = 0x3C5C, word 5 >> 2 = 0x0F17).
+        """
+        link = self._link
+        with link.lock:
+            value = link.read_config(FENCE_REGISTER)
+            expected = (value & ~0b11) | cmd_interpret.STATUS_PAGE_FIXED_PATTERN
+            link.write_config(FENCE_REGISTER, expected)
+            got = link.read_config(FENCE_REGISTER)
+            if got != expected:
+                raise RuntimeError(f"Reg13 read back 0x{got:04x}, expected 0x{expected:04x}: not a register reply")
+            w6 = link.read_status(cmd_interpret.PAGE2_PATTERN_WORD_ADDR)
+            w5 = link.read_status(5)
+        if w6 != cmd_interpret.PAGE2_PATTERN_WORD or (w5 >> 2) != cmd_interpret.PAGE2_WORD5_CONSTANT:
+            raise RuntimeError(f"status page 2 read 0x{w6:04x} / 0x{w5:04x}, not the fixed patterns: not a status reply")
+
+    def _release_without_link(self) -> None:
+        """Close the chip and drop the link without taking its lock (a stuck thread holds it)."""
+        if self._chip is not None:
+            self._chip.close()
+            self._chip = None
+        self._link = None
+        self._reader = None
+        self._engine = None
+        with self._cache_lock:
+            self._cache = None
 
     def _release_run_thread_io(self) -> None:
         """Shut down the link socket a blocked thread reads from (without its lock, which that thread holds).
@@ -365,9 +395,14 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         link.sock = None
         self._reopen_for_quiesce = True
 
-    def _close_released_sockets(self) -> None:
+    def _poller_alive(self) -> bool:
         poller = self._poller
-        if self.__dict__.get("_run_thread_stuck") or (poller is not None and poller.is_alive()):
+        return poller is not None and poller.is_alive()
+
+    def _close_released_sockets(self) -> None:
+        if self.__dict__.get("_run_thread_stuck") or self._poller_alive():
+            if self.__dict__.get("_released_sockets"):
+                self.log.warning("Shut-down KC705 socket left open on purpose: a thread may still be inside recv")
             return
         for sock in self.__dict__.pop("_released_sockets", []):
             cmd_interpret.close_socket(sock)
@@ -382,10 +417,13 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         if not stopped:
             return "scan thread still running: KC705 and I2C left open for its register restore; FC state UNKNOWN"
         link = self._link
-        if self.__dict__.get("_run_thread_stuck"):
-            released = run_step(log, f"Releasing KC705 and I2C ({reason})", self._release)
-            return "run thread still running: KC705 register traffic skipped; DAQ/FC state UNKNOWN" + (
-                "" if released else "; releasing KC705 and I2C failed"
+        stuck = "run thread" if self.__dict__.get("_run_thread_stuck") else "counter poller" if self._poller_alive() else None
+        if stuck:
+            # that thread holds link.lock: no register traffic, and no close that would wait for the lock
+            released = run_step(log, f"Releasing I2C ({reason})", self._release_without_link)
+            run_step(log, f"Closing the shut-down KC705 connections ({reason})", self._close_released_sockets)
+            return f"{stuck} still running: KC705 register traffic skipped; FC state UNKNOWN" + (
+                "; I2C closed" if released else "; releasing I2C failed"
             )
         if link is None or not link.is_open:
             if link is None or not reopen:
@@ -409,10 +447,8 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
             self._fc_mode = "idle"
         else:
             failed.append("FC idle")
-        log.info(f"Reading Reg{FENCE_REGISTER} back to confirm the shutdown writes (waits up to {QUIESCE_IO_TIMEOUT_S} s)")
-        answered = run_step(
-            log, f"Reading back Reg{FENCE_REGISTER} after the shutdown writes ({reason})", link.read_config, FENCE_REGISTER
-        )
+        self._log_wait(QUIESCE_IO_TIMEOUT_S, "each read of the Reg13 / status page 2 read-back", "info")
+        answered = run_step(log, f"Reading back Reg13 and status page 2 after the shutdown writes ({reason})", self._fence)
         released = run_step(log, f"Releasing KC705 and I2C ({reason})", self._release)
         run_step(log, f"Closing the shut-down KC705 connections ({reason})", self._close_released_sockets)
         return shutdown_text(
@@ -724,7 +760,7 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         if join:
             # one point takes at most (settle_windows + 2) windows + 1 s, plus the register restore
             bound = (self.settle_windows + 3) * self.firmware_window_s + 30.0
-            self.log.warning(f"Waiting up to {bound:.0f} s for the scan to stop and restore the pixel registers")
+            self._log_wait(bound, "the scan to stop and restore the pixel registers")
             thread.join(timeout=bound)
             if thread.is_alive():
                 self.log.critical("Scan thread did not stop; pixel registers may not be restored yet")

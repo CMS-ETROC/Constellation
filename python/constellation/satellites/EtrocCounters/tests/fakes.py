@@ -215,6 +215,13 @@ class FakeKC705:
         self.stall_on_fifo_read = False
         self.stalled = False
         self.held: list[tuple[int, int]] = []
+        self.held_log: list[tuple[int, int]] = []  # every word ever held, for inspection
+        # single_stream: the firmware has one TCP stream and one command decoder (NTCPSTREAMS = 1).
+        # After the client's FIN it listens again, but the stalled FIFO read is still pending: when
+        # its data becomes available it arrives on the NEXT connection, ahead of the replies to that
+        # connection's commands, which queue behind it.
+        self.single_stream = False
+        self.pending_fifo: list[int] = []
         self.connections = 0
         self.refresh = [0, 0, 0, 0]
         self.latched = [dict(data=0, header=0, trig=0, combine=0) for _ in range(4)]
@@ -322,9 +329,21 @@ class FakeKC705:
             except OSError:
                 return
             conn.settimeout(0.1)
+            late: list[int] = []
+            backlog: list = []
             with self.lock:
                 self.connections += 1
                 conn_id = self.connections
+                if self.single_stream and self.stalled and self.pending_fifo:
+                    late, self.pending_fifo = self.pending_fifo, []
+                    self.stalled = False
+                    held, self.held = self.held, []
+                    backlog = [self._handle(w) for _, w in held]
+            for reply in [late, *backlog]:
+                if isinstance(reply, list) and reply:
+                    conn.sendall(struct.pack(f">{len(reply)}I", *reply))
+                elif isinstance(reply, int):
+                    conn.sendall(struct.pack(">I", reply))
             buf = b""
             with conn:
                 while not self._stop.is_set():
@@ -343,6 +362,7 @@ class FakeKC705:
                         with self.lock:
                             if self.stalled:
                                 self.held.append((conn_id, word))
+                                self.held_log.append((conn_id, word))
                                 continue
                         reply = self._handle(word)
                         if isinstance(reply, list):
@@ -377,6 +397,7 @@ class FakeKC705:
                 if self.stall_on_fifo_read:
                     self.stall_on_fifo_read = False
                     self.stalled = True
+                    self.pending_fifo = [(FIFO_FILLER << 20) | (i & 0xFFFFF) for i in range(low + 1)]
                     return None
                 return [(FIFO_FILLER << 20) | (i & 0xFFFFF) for i in range(low + 1)]
             self.received.append(("other", upper, low))
@@ -404,9 +425,14 @@ class FakeKC705:
             self.daq_running = False
 
     # --- stall mode ---------------------------------------------------------
-    def stall(self, on_fifo_read: bool = True) -> None:
-        """Stall at the next data-FIFO read (or now): from then on no command is executed or answered."""
+    def stall(self, on_fifo_read: bool = True, single_stream: bool = False) -> None:
+        """Stall at the next data-FIFO read (or now): from then on no command is executed or answered.
+
+        With single_stream, the stalled FIFO read's data arrives on the next connection, followed by
+        the replies to everything held (the firmware's one stream and one command decoder).
+        """
         with self.lock:
+            self.single_stream = single_stream
             if on_fifo_read:
                 self.stall_on_fifo_read = True
             else:
@@ -423,7 +449,7 @@ class FakeKC705:
     def held_reads(self, conn_id: int) -> list[int]:
         """Held request words of one connection that expect a reply (status/config reads)."""
         with self.lock:
-            return [w for c, w in self.held if c == conn_id and (w >> 16) & 0x8000]
+            return [w for c, w in self.held_log if c == conn_id and (w >> 16) & 0x8000]
 
     # --- inspection -------------------------------------------------------
     def writes_to(self, reg: int) -> list[int]:

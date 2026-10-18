@@ -6,6 +6,8 @@ EtrocTransmitter reconfigure and Ctrl-C reentry, over loopback CSCP against the 
 """
 
 import logging
+import os
+import signal
 import threading
 import time
 import types
@@ -70,7 +72,7 @@ def failed_steps(caplog):
     return [r.getMessage() for r in caplog.records if "failed" in r.getMessage()]
 
 
-def _satellite(monkeypatch, start_thread=True, socket_timeout=5.0):
+def _satellite(monkeypatch, start_thread=True, socket_timeout=5.0, extra_config=None):
     # the firmware waits (2.1 s after a FIFO reset) are not needed against the simulation
     fast_time = types.SimpleNamespace(**{n: getattr(time, n) for n in ("strftime", "localtime", "time", "monotonic")})
     fast_time.sleep = lambda s: None
@@ -97,6 +99,7 @@ def _satellite(monkeypatch, start_thread=True, socket_timeout=5.0):
         "fast_command_memo": "Start QInj L1A Triggerbit",
         "num_fifo_read": 16,
         "_data": {"disable_transmission": True},
+        **(extra_config or {}),
     }
     try:
         assert call(tx, "initialize", config).verb_type == OK
@@ -413,3 +416,172 @@ def test_reconfigure_readback_mismatch_fails_the_transition(setup):
     assert call(tx, "reconfigure", {"polarity": 0x4123}).verb_type == OK
     wait_state(sat, SatelliteState.ERROR)
     assert "did not take the value" in sat.fsm.status, sat.fsm.status
+
+
+# --------------------------------------------------------------- round 4: fences, single stream, real SIGINT
+class _FillerSocket(_SilentSocket):
+    """A link whose every reply is FIFO filler: the late data of a FIFO read left pending on the stream."""
+
+    def recv(self, n):
+        return bytes.fromhex("55600001") * (n // 4) + b"\x00" * (n % 4)
+
+
+def test_fence_rejects_stray_fifo_data():
+    sat = EtrocTransmitter.__new__(EtrocTransmitter)
+    sat.log = logging.getLogger("probe")
+    link = _FillerSocket()
+    sat.connection_socket, sat.timestamp, sat._daq_started = link, 0x10, True
+    text = sat._quiesce("probe")
+    assert 0x000B0400 in link.words
+    unknown_not_claimed([text])
+
+
+def test_ctrl_c_on_a_single_stream_stall_rejects_the_late_fifo_data(setup, caplog):
+    sat, tx, fake, thread = setup
+    sat.REENTRY_JOIN_TIMEOUT_S = 1.0
+    start_run(sat, tx, fake)
+    # the FIFO read's data arrives late, on the fresh connection, ahead of the stop sequence's replies
+    fake.stall(single_stream=True)
+    deadline = time.monotonic() + 5
+    while not fake.stalled:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    caplog.clear()
+    ctrl_c(sat, thread)
+    unknown_not_claimed([r.getMessage() for r in caplog.records])
+    assert fake.held_reads(1) == []
+    assert fake.pulses(STOP_DAQ_BIT) >= 1 and not fake.daq_running
+    assert_run_thread_gone(sat)
+
+
+def test_ctrl_c_on_a_healthy_board_reports_the_verified_state(setup, caplog):
+    sat, tx, fake, thread = setup
+    start_run(sat, tx, fake)
+    caplog.clear()
+    ctrl_c(sat, thread)
+    shutdown = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Shutdown (reentry)")]
+    assert shutdown and "DAQ stopped (session_DAQ_on = 0)" in shutdown[0] and "fast commands idle" in shutdown[0]
+    assert "UNKNOWN" not in shutdown[0]
+
+
+@pytest.mark.parametrize(
+    "stored, change, words",
+    [
+        # a typo key: the controller would refuse it as unused inside the transition (ERROR)
+        ({}, {"triggerbit_dleay": 0x1DE7}, ["does not read ['triggerbit_dleay']"]),
+        # stored at initialize but not a DEFAULT_CONFIG key: passed the pre-check, then ERROR ("not used")
+        ({"allow_default_config": True}, {"allow_default_config": False}, ["'allow_default_config' cannot change"]),
+    ],
+)
+def test_reconfigure_of_a_key_the_satellite_does_not_apply_is_refused(monkeypatch, stored, change, words):
+    gen = _satellite(monkeypatch, extra_config=stored)
+    sat, tx, fake, _ = next(gen)
+    try:
+        rep = call(tx, "reconfigure", change)
+        assert rep.verb_type != OK
+        assert all(w in rep.verb_msg for w in words), rep.verb_msg
+        time.sleep(0.3)
+        assert sat.fsm.state == SatelliteState.ORBIT
+    finally:
+        next(gen, None)
+
+
+def test_fail_gracefully_from_another_thread_releases_the_blocked_run_thread(monkeypatch):
+    gen = _satellite(monkeypatch, socket_timeout=30.0)
+    sat, tx, fake, _ = next(gen)
+    try:
+        start_run(sat, tx, fake)
+        fake.stall()
+        deadline = time.monotonic() + 5
+        while not fake.stalled:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        text = sat.fail_gracefully()  # the command thread's view: the run thread is blocked in recv
+        unknown_not_claimed([text])
+        # no register traffic on the stream the run thread was blocked on
+        assert fake.held_reads(1) == []
+        sat._state_thread_fut.result(timeout=5.0)
+    finally:
+        next(gen, None)
+
+
+def _slow_step(sat, name, before):
+    """Wrap sat.<name> so that `before()` runs and the step then takes 0.6 s (Ctrl-C lands inside it)."""
+    real = getattr(sat, name)
+
+    def slow(*args, **kwargs):
+        before()
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline:
+            time.sleep(0.02)
+        return real(*args, **kwargs)
+
+    setattr(sat, name, slow)
+
+
+def test_real_sigint_during_the_stop_sequence_is_ignored(main_thread_setup):
+    sat, tx, fake, pump = main_thread_setup
+    start_run(sat, tx, fake)
+    _slow_step(sat, "_stop_daq", lambda: threading.Timer(0.1, os.kill, (os.getpid(), signal.SIGINT)).start())
+    interrupt_main_loop(sat)
+    assert not run_main_loop(sat, pump)
+    assert not fake.daq_running and not qinj_playing(fake)
+    assert sat.connection_socket is None
+
+
+def test_ctrl_c_before_the_sigint_handler_is_installed_still_shuts_down(main_thread_setup, monkeypatch):
+    sat, tx, fake, pump = main_thread_setup
+    start_run(sat, tx, fake)
+    from ...EtrocCommon import lifecycle
+
+    calls = []
+
+    def signal_once(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return signal.signal(*args)
+
+    fake_signal = types.SimpleNamespace(**{n: getattr(signal, n) for n in dir(signal) if not n.startswith("__")})
+    fake_signal.signal = signal_once
+    monkeypatch.setattr(lifecycle, "signal", fake_signal)
+    interrupt_main_loop(sat)
+    assert not run_main_loop(sat, pump)
+    assert not fake.daq_running and not qinj_playing(fake)
+    assert sat.connection_socket is None
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_third_ctrl_c_during_the_shutdown_restores_the_default_action(main_thread_setup, caplog):
+    sat, tx, fake, pump = main_thread_setup
+    start_run(sat, tx, fake)
+    seen = {}
+
+    def press_three_times():
+        def presses():
+            for _ in range(3):
+                os.kill(os.getpid(), signal.SIGINT)
+                time.sleep(0.15)
+
+        threading.Thread(target=presses, daemon=True).start()
+
+    real = sat._stop_state_thread
+
+    def stop_with_presses(timeout):
+        press_three_times()
+        deadline = time.monotonic() + 3
+        while sat.__dict__.get("_ctrl_c_presses", 0) < 3 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        seen["action"] = signal.getsignal(signal.SIGINT)
+        return real(timeout)
+
+    sat._stop_state_thread = stop_with_presses
+    interrupt_main_loop(sat)
+    assert not run_main_loop(sat, pump)
+    assert seen["action"] is signal.SIG_DFL
+    ignored = [r for r in caplog.records if "press 3 times to abort the shutdown" in r.getMessage()]
+    # Constellation logs error() at its CRITICAL level
+    assert [r.levelno >= logging.ERROR for r in ignored] == [False, False, True]
+    assert "waiting up to" in ignored[0].getMessage()
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+    assert not fake.daq_running and sat.connection_socket is None

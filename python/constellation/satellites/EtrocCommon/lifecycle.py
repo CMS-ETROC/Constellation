@@ -12,8 +12,12 @@ process hangs at exit in `concurrent.futures` while the run loop keeps talking t
 satellite's `_quiesce()`, the same helper `fail_gracefully()` uses.
 
 A second Ctrl-C must not cut the shutdown short. KeyboardInterrupt is a BaseException, so
-`run_step` catches it explicitly; reentry ignores SIGINT while it runs (main thread only);
-and `run_satellite` runs reentry also when a KeyboardInterrupt escapes the framework's loop.
+`run_step` catches it explicitly; reentry ignores SIGINT while it runs (main thread only),
+installing that handler before anything else; and `run_satellite` runs reentry whenever its
+steps have not completed, also when a KeyboardInterrupt escapes the framework's loop or hits
+reentry before the handler is in place. Each ignored Ctrl-C logs what the shutdown is waiting
+for; the third restores the default SIGINT action, so a fourth ends the process and leaves the
+hardware as it is (the operator's way out of a long bounded wait).
 
 A run thread that does not stop within the bound is usually blocked in a read on the board's
 single TCP stream. Its link is then closed (the shutdown wakes the blocked recv), the thread
@@ -29,6 +33,8 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
 CTRL_C_IGNORED = "Ctrl-C ignored: shutdown in progress"
+# presses after which the default SIGINT action is restored (the next one ends the process)
+CTRL_C_ABORT_PRESSES = 3
 
 
 def run_step(log: Any, what: str, fn: Callable[..., Any], *args: Any) -> bool:
@@ -104,7 +110,7 @@ class EtrocLifecycle:
             evt.set()
         if fut is None or fut.done():
             return True
-        self.log.warning(f"Waiting up to {timeout:.1f} s for the run thread to stop")
+        self._log_wait(timeout, "the run thread to stop")
         try:
             fut.result(timeout=timeout)
         except FutureTimeoutError:
@@ -117,6 +123,7 @@ class EtrocLifecycle:
     def _settle_run_thread(self, timeout: float) -> None:
         """Stop the run thread; if it hangs, close its link and wait once more. Sets `_run_thread_stuck`."""
         self._run_thread_stuck = False
+        self._current_wait = f"waiting up to {timeout + self.RELEASE_JOIN_TIMEOUT_S:.1f} s for the run thread to stop"
         if self._on_run_thread():
             # the failure path of do_run itself: the run loop is this thread and no longer uses the link
             return
@@ -138,28 +145,55 @@ class EtrocLifecycle:
     def _stop_transport_for_reentry(self) -> None:
         """Stop CDTP sender/receiver threads (non-daemon) before the hardware is released."""
 
+    def _log_wait(self, bound: float, what: str, level: str = "warning") -> None:
+        """Log a bounded wait before it starts; an ignored Ctrl-C names the wait in progress."""
+        text = f"waiting up to {bound:.1f} s for {what}"
+        self._current_wait = text
+        getattr(self.log, level)(text[0].upper() + text[1:])
+
     def _ignore_sigint(self, signum: int, frame: Any) -> None:
-        self.log.warning(CTRL_C_IGNORED)
+        presses = self.__dict__.get("_ctrl_c_presses", 0) + 1
+        self._ctrl_c_presses = presses
+        wait = self.__dict__.get("_current_wait", "running the shutdown steps")
+        text = (
+            f"{CTRL_C_IGNORED}, {wait}; press {CTRL_C_ABORT_PRESSES} times to abort the shutdown with the "
+            f"hardware as is ({presses}/{CTRL_C_ABORT_PRESSES})"
+        )
+        if presses < CTRL_C_ABORT_PRESSES:
+            self.log.warning(text)
+            return
+        self.log.error(text + ": the next Ctrl-C ends the process; the KC705/I2C state is then unknown")
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     def run_satellite(self) -> None:
-        """The framework loop; a KeyboardInterrupt that escapes it (e.g. during its idle sleep) still runs reentry."""
-        try:
-            super().run_satellite()  # type: ignore[misc]
-        except KeyboardInterrupt:
-            self.log.warning("Satellite caught KeyboardInterrupt outside the main loop, shutting down.")
-            if not self.__dict__.get("_reentered", False):
-                self.reentry()
+        """The framework loop; reentry runs whenever its steps have not completed (a KeyboardInterrupt that
+        escapes the loop, e.g. during its idle sleep, or that hits reentry before its SIGINT handler)."""
+        for _ in range(3):
+            try:
+                if not self.__dict__.get("_reentered", False):
+                    super().run_satellite()  # type: ignore[misc]
+                elif not self.__dict__.get("_reentry_done", False):
+                    self.reentry()
+            except KeyboardInterrupt:
+                pass
+            if self.__dict__.get("_reentry_done", False):
+                return
+            self._reentered = True  # the framework loop is left: from here on only reentry runs
+        self.log.critical("Shutdown did not complete after repeated Ctrl-C")
 
     def reentry(self) -> None:
-        self._reentered = True
         previous = None
         if threading.current_thread() is threading.main_thread():
+            # the handler first: a Ctrl-C from here on is logged, not raised
             try:
                 previous = signal.signal(signal.SIGINT, self._ignore_sigint)
             except (ValueError, OSError) as e:
                 self.log.warning(f"Could not ignore Ctrl-C during the shutdown: {e}")
+        self._reentered = True
+        self._ctrl_c_presses = 0
         try:
             self._reentry_steps()
+            self._reentry_done = True
         finally:
             if previous is not None:
                 signal.signal(signal.SIGINT, previous)

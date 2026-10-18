@@ -221,6 +221,8 @@ class EtrocTransmitter(
     def _verify_daq_stopped(self) -> str:
         """session_DAQ_on (status page 2 word 5 bit 1; _stop_daq selected page 2) must read 0."""
         word = cmd_interpret.read_status_reg(self.connection_socket, 5)
+        if (word >> 2) != cmd_interpret.PAGE2_WORD5_CONSTANT:
+            raise RuntimeError(f"DAQ state UNKNOWN: status read returned 0x{word:04x}, not a status word")
         if (word >> 1) & 1:
             raise RuntimeError(f"session_DAQ_on still 1 after stop_DAQ (status word 5 = 0x{word:04x})")
         return "DAQ stopped (session_DAQ_on = 0)"
@@ -253,7 +255,7 @@ class EtrocTransmitter(
         if thread is None or not thread.is_alive():
             return
         dtm._stopevt.set()
-        self.log.warning(f"Waiting up to {self.REENTRY_JOIN_TIMEOUT_S:.1f} s for the CDTP push thread")
+        self._log_wait(self.REENTRY_JOIN_TIMEOUT_S, "the CDTP push thread")
         thread.join(timeout=self.REENTRY_JOIN_TIMEOUT_S)
         if thread.is_alive():
             self.log.error("CDTP push thread still sending after reentry; it ends at its data_timeout")

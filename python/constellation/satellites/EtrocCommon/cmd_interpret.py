@@ -85,6 +85,13 @@ VALID_PRESCALE_FACTORS = {
 # Status register addresses served by the control interface (16-bit words 0-10 of the
 # 176-bit STATUS_REG; word n = STATUS_REG[16n+15:16n], src/control_interface.vhd).
 STATUS_REGISTER_COUNT = 11
+# Status page 2 (Reg13[1:0] = 0b10) holds fixed patterns (ETROC2TestFirmware notes, page 2):
+# words 6-10 = 0x3C5C, word 5 = {14'h0F17, session_DAQ_on, hist_fill_done}. A read whose
+# value is known this way tells a register reply from stray FIFO data on the stream.
+STATUS_PAGE_FIXED_PATTERN = 0b10
+PAGE2_PATTERN_WORD_ADDR = 6
+PAGE2_PATTERN_WORD = 0x3C5C
+PAGE2_WORD5_CONSTANT = 0x0F17
 
 # The KC705 TCP server (COM5402, src/gig_eth/tcp_server) is built with NTCPSTREAMS = 1:
 # one client at a time. A second client is not refused, its SYN is ignored, so a

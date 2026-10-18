@@ -230,9 +230,12 @@ initialize, without a landing (refused while a scan runs). Other keys are refuse
 "land and re-initialize to change it" and the satellite stays in ORBIT. On Ctrl-C the
 satellite stops the run or scan (waiting for the pixel-register restore; a further Ctrl-C
 there is logged and ignored), writes `ended_by = "reentry"` into `run.json`, sets the FC to
-idle, reads Reg13 back and releases the KC705 and the USB-ISS. It reports "fast commands
-idle" only when that read answered, otherwise "FC state UNKNOWN"; ERROR
-(`fail_gracefully`) does the same.
+idle, reads back known values (Reg13 with status page 2 selected, and the page's fixed
+patterns 0x3C5C / 0x0F17) and releases the KC705 and the USB-ISS. It reports "fast
+commands idle" only when those reads answered as expected, otherwise "FC state UNKNOWN";
+ERROR (`fail_gracefully`) and landing do the same. If the counter poller does not stop
+(blocked on a stalled board, holding the link), no register traffic is sent: only I2C is
+released and the state is reported UNKNOWN.
 
 ## First test on hardware (checklist)
 

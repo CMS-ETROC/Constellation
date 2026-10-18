@@ -71,7 +71,14 @@ reports as problems: a section the satellite would refuse (none of the required 
 entry without a section, invalid satellite names, and keys the type does not read (with
 the likely spelling for a typo). Required keys partly missing are a note. `$_{VAR}`
 references are checked as written. Exit status 0 when clean, 1 with problems, 2 when the
-file cannot be read.
+file cannot be read. `kc705_registers` is an EtrocCounters key only; in another type's
+section it is reported as unknown.
+
+A required key in `[<Type>._default]` (or `[_default]`) is reported as "[EtrocTransmitter._default]
+holds `polarity`, a required key of EtrocTransmitter: ..." and the exit status is 1, on
+purpose: every satellite of the type then receives the key, so the initialize guard can no
+longer tell that a satellite's own section is missing. Fix: move the required keys into
+each `[<Type>.<name>]` section; shared non-required keys can stay in the default section.
 
 `compressed_binary` and `save_html` from the 0.x files are not supported in 1.x: the
 satellites never read them, so the preflight reports them and the operator drops the key.
@@ -172,18 +179,31 @@ loader imports only the files it was installed with, so a new module (e.g.
   EtrocReceiver closes the data file and writes the not-stopped-cleanly marker. Each step
   logs its own failure and the next one still runs; a second reentry does nothing.
   Every bounded wait is logged before it starts. A further Ctrl-C during the shutdown is
-  logged ("Ctrl-C ignored: shutdown in progress") and the shutdown continues; a Ctrl-C
-  in the main loop's idle sleep runs the same reentry.
+  logged ("Ctrl-C ignored: shutdown in progress, waiting up to N s for <step>; press 3
+  times to abort the shutdown with the hardware as is (k/3)") and the shutdown continues.
+  The third press is logged as an error and restores the default Ctrl-C action: a fourth
+  ends the process at once and leaves the KC705 and I2C as they are (the way out of a long
+  bounded wait, e.g. EtrocWaveform with four chips: up to 86 s). A Ctrl-C in the main
+  loop's idle sleep, or one that arrives before the shutdown's Ctrl-C handler is in
+  place, still runs the shutdown.
 - The shutdown claims a hardware state only when the board answered a read after the
-  writes: the stop pulse and FC idle go out first, then Reg13 is read back with a 2 s
-  timeout. The log and the `fail_gracefully` status then say "DAQ stopped" / "fast commands
-  idle"; otherwise "DAQ/FC state UNKNOWN: board did not answer", and failed steps are named.
+  writes: the stop pulse and FC idle go out first, then a fence of reads whose answers are
+  known (2 s timeout each): Reg13 is written with status page 2 selected and read back,
+  and status word 6 must read the page's fixed pattern 0x3C5C (word 5 must carry 0x0F17
+  before its session_DAQ_on bit is trusted). Stray data on the stream, such as the late
+  reply to a FIFO read the run thread left pending, fails the fence instead of passing as
+  an answer. The log and the `fail_gracefully` status then say "DAQ stopped" / "fast
+  commands idle"; otherwise "DAQ/FC state UNKNOWN: board did not answer", and failed steps
+  are named.
   A run thread blocked on a stalled board gets its socket shut down and a second 3 s wait;
   the stop sequence then goes out on a fresh connection. If the thread still runs, no
   register traffic is sent and the state is reported UNKNOWN. EtrocWaveform sizes its run
   thread wait from the number of chips (one WS read each).
 - `reconfigure` refuses framework sections (`_data`, `_role`, ...): they need a
-  re-initialize. Register values must be 0-0xFFFF and `num_fifo_read` 1-65536; a register
+  re-initialize. It also refuses, before leaving ORBIT, keys the type does not read (a
+  typo such as `triggerbit_dleay`) and keys it reads only at initialize
+  (`allow_default_config`); Constellation would otherwise reject them as unused inside the
+  transition, in ERROR. The key sets are `satellite_types.known_keys`. Register values must be 0-0xFFFF and `num_fifo_read` 1-65536; a register
   that reads back different from what was written fails the transition (ERROR).
   `prescale_factor` reprograms the FC memory, but the SEU2025 firmware notes list the Reg10
   prescale bits as unused, so the change may have no effect on that firmware.

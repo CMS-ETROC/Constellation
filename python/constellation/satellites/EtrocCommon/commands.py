@@ -229,6 +229,8 @@ class KC705RegisterCommands:
     def _close_released_sockets(self) -> None:
         """Close the sockets `_release_run_thread_io` shut down, unless the run thread may still use them."""
         if self.__dict__.get("_run_thread_stuck"):
+            if self.__dict__.get("_released_sockets"):
+                self.log.warning("Shut-down KC705 socket left open on purpose: the run thread may still be inside recv")
             return
         for sock in self.__dict__.pop("_released_sockets", []):
             cmd_interpret.close_socket(sock)
@@ -239,7 +241,28 @@ class KC705RegisterCommands:
         )
 
     def _fence_read(self) -> None:
-        cmd_interpret.read_config_reg(self.connection_socket, FENCE_REGISTER)
+        """Reads whose answers are known, after the shutdown writes; raises if a reply is not the expected one.
+
+        Writes Reg13 (timestamp) with status page 2 selected, reads it back and compares, then
+        reads the fixed pattern of status page 2. Stray data on the stream (e.g. the late reply
+        to a FIFO read the run thread left pending) fails the comparison instead of passing as
+        an answer.
+        """
+        sock = self.connection_socket
+        expected = (int(getattr(self, "timestamp", 0)) & ~0b11) | cmd_interpret.STATUS_PAGE_FIXED_PATTERN
+        self.timestamp = expected
+        cmd_interpret.write_config_reg_decoded(sock, "timestamp", expected)
+        got = cmd_interpret.read_config_reg(sock, FENCE_REGISTER)
+        if got != expected:
+            raise RuntimeError(
+                f"Reg{FENCE_REGISTER} read back 0x{got:04x}, expected 0x{expected:04x}: not a register reply"
+            )
+        word = cmd_interpret.read_status_reg(sock, cmd_interpret.PAGE2_PATTERN_WORD_ADDR)
+        if word != cmd_interpret.PAGE2_PATTERN_WORD:
+            raise RuntimeError(
+                f"status word {cmd_interpret.PAGE2_PATTERN_WORD_ADDR} (page 2) read 0x{word:04x}, expected "
+                f"0x{cmd_interpret.PAGE2_PATTERN_WORD:04x}: not a status reply"
+            )
 
     def _kc705_quiesce(self, reason: str, steps: list[tuple[str, Any, Any]]) -> str:
         """Shutdown writes on the KC705, then one read-back; returns what was verified.
@@ -257,6 +280,7 @@ class KC705RegisterCommands:
         sock = getattr(self, "connection_socket", None)
         if sock is None:
             if not reopen:
+                run_step(log, f"Closing the shut-down KC705 connections ({reason})", self._close_released_sockets)
                 return "KC705 connection already closed"
             if not run_step(log, f"Opening a fresh KC705 connection ({reason})", self._open_quiesce_connection):
                 run_step(log, f"Closing the shut-down KC705 connections ({reason})", self._close_released_sockets)
@@ -272,16 +296,21 @@ class KC705RegisterCommands:
         fc_idle = run_step(log, f"Idling the fast commands ({reason})", self.configure_memo_FC, "Triggerbit")
         if not fc_idle:
             failed.append("FC idle")
-        log.info(f"Reading Reg{FENCE_REGISTER} back to confirm the shutdown writes (waits up to {QUIESCE_IO_TIMEOUT_S} s)")
+        self._log_wait(
+            QUIESCE_IO_TIMEOUT_S, f"each read of the Reg{FENCE_REGISTER} / status page 2 read-back that confirms the "
+            f"shutdown writes", "info",
+        )
         answered = run_step(log, f"Reading back Reg{FENCE_REGISTER} after the shutdown writes ({reason})", self._fence_read)
         verified = []
         if answered:
             for label, verify in done:
-                text = {}
-                if run_step(log, f"Checking {label} ({reason})", lambda: text.update(t=verify())):
-                    verified.append(text["t"])
-                else:
-                    failed.append(f"{label} not confirmed")
+                try:
+                    verified.append(verify())
+                except KeyboardInterrupt:
+                    failed.append(f"{label} not confirmed (Ctrl-C)")
+                except Exception as e:
+                    log.warning(f"Checking {label} ({reason}) failed: {e}")
+                    failed.append(f"{label} not confirmed: {e}")
             if fc_idle:
                 verified.append("fast commands idle")
         closed = run_step(log, f"Closing the KC705 connection ({reason})", self._close_connection)

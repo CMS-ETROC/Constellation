@@ -8,6 +8,7 @@ EtrocCounters driven over CSCP (real ZeroMQ on loopback) against the simulated K
 import json
 import threading
 import time
+import types
 
 import pytest
 import zmq
@@ -208,7 +209,14 @@ def test_settled_recovers_after_counter_reset(setup):
     wait_settled(tx)
     with fake.lock:
         fake.refresh = [0, 0, 0, 0]  # what a re-alignment does to every counter
-    assert wait_settled(tx)["refresh"] < 20
+    # windows latched before the reset may still be served for a moment; the new count must settle
+    deadline = time.monotonic() + 5
+    while True:
+        rep = call(tx, "read_counters").payload
+        if rep is not None and rep["settled"] and rep["refresh"] < 20:
+            break
+        assert time.monotonic() < deadline, f"never settled after the reset: {rep}"
+        time.sleep(WINDOW / 2)
 
 
 def test_fail_gracefully_mid_scan_restores_and_idles(setup):
@@ -458,3 +466,18 @@ def test_kc705_register_reconfigure_restarts_the_settle_count(setup):
     wait_state(sat, SatelliteState.ORBIT)
     assert call(tx, "read_counters").payload["settled"] is False
     assert wait_settled(tx, timeout=10.0)["settled"]
+
+
+def test_failed_refresh_read_at_a_change_does_not_report_settled():
+    sat = EtrocCounters.__new__(EtrocCounters)
+    sat._cache_lock, sat.settle_windows = threading.Lock(), 2
+
+    class Unreadable:
+        def read_refresh(self):
+            raise TimeoutError("timed out")
+
+    sat._reader = Unreadable()
+    sat._mark_change()
+    assert sat._settle_ref is None
+    window = lambda refresh: types.SimpleNamespace(refresh=refresh)
+    assert [sat._is_settled(window(r)) for r in (100, 101, 102)] == [False, False, True]
