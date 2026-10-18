@@ -132,7 +132,9 @@ scan runs.
 
 `read_counters` returns the last completed window (refresh, data, header, trigbit,
 combine, channel, en_L1A, LED bits, the raw status words) plus `settled`, which is false
-until `settle_windows` windows have completed after the last channel or FC change.
+until `settle_windows` windows have completed after the last channel, FC or KC705
+register change (also a `reconfigure` of `kc705_registers`); if the refresh counter could
+not be read at the change, the count starts at the next window read.
 `set_channel` and `set_fc_mode` are refused while a scan runs.
 
 `noise_scan` (FC set to idle for the scan): `pixels` `[[row, col], ...]` (required);
@@ -226,8 +228,11 @@ In ORBIT, `reconfigure` changes `channel`, `fc_mode_on_launch`, `prescale_factor
 `check_layout`, `settle_windows`, `l1a_delay` and the `kc705_registers` keys set at
 initialize, without a landing (refused while a scan runs). Other keys are refused with
 "land and re-initialize to change it" and the satellite stays in ORBIT. On Ctrl-C the
-satellite stops the run or scan, writes `ended_by = "reentry"` into `run.json`, sets the
-FC to idle and releases the KC705 and the USB-ISS.
+satellite stops the run or scan (waiting for the pixel-register restore; a further Ctrl-C
+there is logged and ignored), writes `ended_by = "reentry"` into `run.json`, sets the FC to
+idle, reads Reg13 back and releases the KC705 and the USB-ISS. It reports "fast commands
+idle" only when that read answered, otherwise "FC state UNKNOWN"; ERROR
+(`fail_gracefully`) does the same.
 
 ## First test on hardware (checklist)
 

@@ -19,7 +19,8 @@ from constellation.core.message.cscp1 import CSCP1Message
 from constellation.core.network import get_loopback_interface_name
 from constellation.core.protocol.cscp1 import SatelliteState
 
-from ...EtrocCounters.tests.fakes import FC_QINJ, FakeKC705
+from ...EtrocCounters.tests.fakes import FC_QINJ, FakeKC705, interrupt_main_loop, run_main_loop, start_task_pump
+from ...EtrocCommon.commands import QUIESCE_IO_TIMEOUT_S
 from .. import EtrocTransmitter as tx_module
 from ..EtrocTransmitter import EtrocTransmitter
 
@@ -69,16 +70,20 @@ def failed_steps(caplog):
     return [r.getMessage() for r in caplog.records if "failed" in r.getMessage()]
 
 
-@pytest.fixture
-def setup(monkeypatch):
+def _satellite(monkeypatch, start_thread=True, socket_timeout=5.0):
     # the firmware waits (2.1 s after a FIFO reset) are not needed against the simulation
     fast_time = types.SimpleNamespace(**{n: getattr(time, n) for n in ("strftime", "localtime", "time", "monotonic")})
     fast_time.sleep = lambda s: None
     monkeypatch.setattr(tx_module, "time", fast_time)
     fake = FakeKC705(window_s=0.05).start()
     sat = EtrocTransmitter(0, "Test", "txlifecycle", 0, 0, 0, [get_loopback_interface_name()])
-    thread = threading.Thread(target=sat.run_satellite, daemon=True)
-    thread.start()
+    if start_thread:
+        thread = threading.Thread(target=sat.run_satellite, daemon=True)
+    else:
+        # the main loop is run later on the main thread (run_main_loop); until then a pump runs the tasks
+        thread = start_task_pump(sat)
+    if start_thread:
+        thread.start()
     ctx = zmq.Context()
     sock = ctx.socket(zmq.REQ)
     sock.setsockopt(zmq.RCVTIMEO, 5000)
@@ -87,25 +92,41 @@ def setup(monkeypatch):
     config = {
         "hostname": "127.0.0.1",
         "port": fake.port,
-        "socket_timeout": 5.0,
+        "socket_timeout": socket_timeout,
         "polarity": 0x4023,
         "fast_command_memo": "Start QInj L1A Triggerbit",
         "num_fifo_read": 16,
         "_data": {"disable_transmission": True},
     }
-    assert call(tx, "initialize", config).verb_type == OK
-    wait_state(sat, SatelliteState.INIT)
-    assert call(tx, "launch").verb_type == OK
-    wait_state(sat, SatelliteState.ORBIT)
-    yield sat, tx, fake, thread
-    if thread.is_alive() and sat.fsm.state == SatelliteState.ORBIT:
-        call(tx, "land")
+    try:
+        assert call(tx, "initialize", config).verb_type == OK
         wait_state(sat, SatelliteState.INIT)
-    sat.reentry()
-    thread.join(5.0)
-    sock.close()
-    ctx.term()
-    fake.stop()
+        assert call(tx, "launch").verb_type == OK
+        wait_state(sat, SatelliteState.ORBIT)
+        yield sat, tx, fake, thread
+    finally:
+        fake.release()
+        if not getattr(sat, "_reentered", False) and thread.is_alive() and sat.fsm.state == SatelliteState.ORBIT:
+            call(tx, "land")
+            wait_state(sat, SatelliteState.INIT)
+        if not start_thread:
+            thread.stop_evt.set()
+        sat.reentry()
+        thread.join(5.0)
+        sock.close()
+        ctx.term()
+        fake.stop()
+
+
+@pytest.fixture
+def setup(monkeypatch):
+    yield from _satellite(monkeypatch)
+
+
+@pytest.fixture
+def main_thread_setup(monkeypatch):
+    """No run_satellite thread: the test calls run_satellite on the main thread, where Ctrl-C lands."""
+    yield from _satellite(monkeypatch, start_thread=False)
 
 
 def test_reconfigure_writes_exactly_the_changed_register_and_updates_the_config(setup):
@@ -142,6 +163,11 @@ def test_reconfigure_memo_reprograms_the_fast_commands(setup):
         ({"polarty": 0x4123}, ["polarty"]),
         ({"prescale_factor": 1000}, ["1000"]),
         ({"fast_command_memo": "Start Trigerbit"}, ["Trigerbit"]),
+        ({"num_fifo_read": 0}, ["num_fifo_read must be 1-65536"]),
+        ({"num_fifo_read": 70000}, ["num_fifo_read must be 1-65536"]),
+        ({"active_channel": -1}, ["active_channel must be a 16-bit register value"]),
+        ({"triggerbit_delay": 0x1FFFF}, ["triggerbit_delay must be a 16-bit register value"]),
+        ({"_data": {"disable_transmission": False}}, ["framework sections (_data)", "re-initialize"]),
     ],
 )
 def test_refused_reconfigure_leaves_the_satellite_in_orbit(setup, change, words):
@@ -217,3 +243,173 @@ def test_reentry_after_landing_touches_nothing(setup, caplog):
     with fake.lock:
         assert fake.received[mark:] == []
     assert failed_steps(caplog) == []
+
+
+# --------------------------------------------------------------- round 3: Ctrl-C escapes, stalls, false success
+def unknown_not_claimed(texts):
+    joined = " | ".join(texts)
+    assert "UNKNOWN" in joined, joined
+    low = joined.lower()
+    assert "daq stopped" not in low and "fast commands idle" not in low, joined
+
+
+def start_run(sat, tx, fake, reads=3):
+    assert call(tx, "start", "run1").verb_type == OK
+    wait_state(sat, SatelliteState.RUN)
+    deadline = time.monotonic() + 5
+    while fake.fifo_reads < reads:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def test_second_ctrl_c_while_stopping_the_run_thread_is_ignored(main_thread_setup, caplog):
+    sat, tx, fake, pump = main_thread_setup
+    start_run(sat, tx, fake)
+    stops = fake.pulses(STOP_DAQ_BIT)
+    real_stop = sat._stop_state_thread
+    calls = []
+
+    def second_ctrl_c(timeout):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        return real_stop(timeout)
+
+    sat._stop_state_thread = second_ctrl_c
+    interrupt_main_loop(sat)
+    assert not run_main_loop(sat, pump), "KeyboardInterrupt escaped the shutdown"
+    assert fake.pulses(STOP_DAQ_BIT) == stops + 1
+    assert not fake.daq_running and not qinj_playing(fake)
+    assert sat.connection_socket is None
+    assert_run_thread_gone(sat)
+    assert any("Ctrl-C ignored: shutdown in progress" in r.getMessage() for r in caplog.records)
+
+
+def test_ctrl_c_in_the_main_loop_idle_sleep_still_runs_reentry(main_thread_setup, monkeypatch):
+    sat, tx, fake, pump = main_thread_setup
+    start_run(sat, tx, fake)
+    from constellation.core import satellite as core_satellite
+
+    raised = []
+
+    def sleep(s):
+        if not raised:
+            raised.append(s)
+            raise KeyboardInterrupt
+        time.sleep(s)
+
+    core_time = types.SimpleNamespace(**{n: getattr(time, n) for n in dir(time) if not n.startswith("_")})
+    core_time.sleep = sleep
+    monkeypatch.setattr(core_satellite, "time", core_time)
+    stops = fake.pulses(STOP_DAQ_BIT)
+    assert not run_main_loop(sat, pump), "KeyboardInterrupt escaped run_satellite"
+    assert raised
+    assert fake.pulses(STOP_DAQ_BIT) == stops + 1 and not fake.daq_running
+    assert sat.connection_socket is None
+    assert_run_thread_gone(sat)
+
+
+def test_ctrl_c_with_a_stalled_board_reports_unknown_and_spares_the_shared_socket(setup, caplog):
+    sat, tx, fake, thread = setup
+    sat.REENTRY_JOIN_TIMEOUT_S = 1.0
+    start_run(sat, tx, fake)
+    fake.stall()  # the next FIFO read gets no answer, nor does anything after it
+    deadline = time.monotonic() + 5
+    while not fake.stalled:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    caplog.clear()
+    t0 = time.monotonic()
+    ctrl_c(sat, thread)
+    elapsed = time.monotonic() - t0
+    unknown_not_claimed([r.getMessage() for r in caplog.records])
+    # nothing read on the link the run thread was blocked on
+    assert fake.held_reads(1) == []
+    bound = sat.REENTRY_JOIN_TIMEOUT_S + sat.RELEASE_JOIN_TIMEOUT_S + 3 * QUIESCE_IO_TIMEOUT_S
+    assert elapsed < bound, f"reentry took {elapsed:.1f} s (bound {bound:.1f} s)"
+    # the stop pulse still went out, on a fresh connection
+    assert any(w == 0x000B0400 for _, w in fake.held)
+    assert_run_thread_gone(sat)
+
+
+def test_reconfigure_failure_on_a_stalled_board_reports_unknown_quickly(monkeypatch):
+    gen = _satellite(monkeypatch, socket_timeout=6.0)
+    sat, tx, fake, _ = next(gen)
+    try:
+        texts, durations = [], []
+        real_fail, real_quiesce = sat.fail_gracefully, sat._quiesce
+
+        def fail_gracefully():
+            texts.append(real_fail())
+            return texts[-1]
+
+        def timed_quiesce(reason):
+            t0 = time.monotonic()
+            try:
+                return real_quiesce(reason)
+            finally:
+                durations.append(time.monotonic() - t0)
+
+        sat.fail_gracefully, sat._quiesce = fail_gracefully, timed_quiesce
+        fake.stall(on_fifo_read=False)
+        assert call(tx, "reconfigure", {"polarity": 0x4123}).verb_type == OK
+        wait_state(sat, SatelliteState.ERROR, timeout=20.0)
+        # the FSM enters ERROR before it runs fail_gracefully
+        deadline = time.monotonic() + 10
+        while not texts:
+            assert time.monotonic() < deadline, "fail_gracefully did not run"
+            time.sleep(0.05)
+        unknown_not_claimed(texts)
+        assert durations and max(durations) < 2 * QUIESCE_IO_TIMEOUT_S + 1.0, durations
+    finally:
+        next(gen, None)
+
+
+class _SilentSocket:
+    """A KC705 link that takes every write and never answers a read."""
+
+    def __init__(self):
+        self.words = []
+
+    def sendall(self, data):
+        self.words += [int.from_bytes(data[i:i + 4], "big") for i in range(0, len(data), 4)]
+
+    def recv(self, n):
+        import socket
+
+        raise socket.timeout("timed out")
+
+    def settimeout(self, t):
+        pass
+
+    def shutdown(self, how):
+        pass
+
+    def close(self):
+        pass
+
+
+def test_stop_pulse_goes_out_before_any_read_on_a_silent_board():
+    sat = EtrocTransmitter.__new__(EtrocTransmitter)
+    sat.log = logging.getLogger("probe")
+    link = _SilentSocket()
+    sat.connection_socket, sat.timestamp, sat._daq_started = link, 0, True
+    text = sat._quiesce("probe")
+    assert 0x000B0400 in link.words, [hex(w) for w in link.words]
+    unknown_not_claimed([text])
+    assert sat.connection_socket is None
+
+
+def test_reconfigure_readback_mismatch_fails_the_transition(setup):
+    sat, tx, fake, _ = setup
+    handle = fake._handle
+
+    def drop_reg14_writes(word):
+        if (word >> 16) == 0x20 + 14:
+            return None  # the board does not take the polarity write
+        return handle(word)
+
+    fake._handle = drop_reg14_writes
+    assert call(tx, "reconfigure", {"polarity": 0x4123}).verb_type == OK
+    wait_state(sat, SatelliteState.ERROR)
+    assert "did not take the value" in sat.fsm.status, sat.fsm.status

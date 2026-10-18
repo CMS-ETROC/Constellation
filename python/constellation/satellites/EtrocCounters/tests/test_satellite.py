@@ -17,9 +17,10 @@ from constellation.core.message.cscp1 import CSCP1Message
 from constellation.core.protocol.cscp1 import SatelliteState
 from constellation.core.network import get_loopback_interface_name
 
+from ...EtrocCommon.commands import QUIESCE_IO_TIMEOUT_S
 from .. import chipio
 from ..EtrocCounters import EtrocCounters
-from .fakes import FakeChip, FakeKC705
+from .fakes import FakeChip, FakeKC705, interrupt_main_loop, run_main_loop, start_task_pump
 
 WINDOW = 0.03
 PIXEL = (2, 5)
@@ -34,8 +35,7 @@ def wait_state(sat, state, timeout=10.0):
         time.sleep(0.01)
 
 
-@pytest.fixture
-def setup(tmp_path, monkeypatch):
+def _counters(tmp_path, monkeypatch, start_thread=True):
     chip = FakeChip({PIXEL: (480, 4)})
 
     def open_chip(*args, **kwargs):
@@ -45,8 +45,12 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(chipio, "I2CGui2ChipIO", open_chip)
     fake = FakeKC705(chip=chip, window_s=WINDOW).start()
     sat = EtrocCounters("Test", "countertest", 0, 0, 0, [get_loopback_interface_name()])
-    thread = threading.Thread(target=sat.run_satellite, daemon=True)
-    thread.start()
+    if start_thread:
+        thread = threading.Thread(target=sat.run_satellite, daemon=True)
+        thread.start()
+    else:
+        # run_satellite is called later on the main thread (run_main_loop); until then a pump runs the tasks
+        thread = start_task_pump(sat)
     ctx = zmq.Context()
     sock = ctx.socket(zmq.REQ)
     sock.setsockopt(zmq.RCVTIMEO, 5000)
@@ -61,17 +65,34 @@ def setup(tmp_path, monkeypatch):
         "chip_name": "ET2p03_sat",
         "kc705_registers": {"triggerbit_delay": 0x1800},
     }
-    yield sat, tx, fake, chip, config
-    if thread.is_alive() and sat.fsm.state == SatelliteState.RUN:
-        call(tx, "stop")
-        wait_state(sat, SatelliteState.ORBIT)
-    if thread.is_alive() and sat.fsm.state == SatelliteState.ORBIT:
-        call(tx, "land")
-        wait_state(sat, SatelliteState.INIT)
-    sat.reentry()
-    sock.close()
-    ctx.term()
-    fake.stop()
+    try:
+        yield sat, tx, fake, chip, config, thread
+    finally:
+        fake.release()
+        alive = thread.is_alive() and not getattr(sat, "_reentered", False)
+        if alive and sat.fsm.state == SatelliteState.RUN:
+            call(tx, "stop")
+            wait_state(sat, SatelliteState.ORBIT)
+        if alive and sat.fsm.state == SatelliteState.ORBIT:
+            call(tx, "land")
+            wait_state(sat, SatelliteState.INIT)
+        if not start_thread:
+            thread.stop_evt.set()
+        sat.reentry()
+        sock.close()
+        ctx.term()
+        fake.stop()
+
+
+@pytest.fixture
+def setup(tmp_path, monkeypatch):
+    for sat, tx, fake, chip, config, _ in _counters(tmp_path, monkeypatch):
+        yield sat, tx, fake, chip, config
+
+
+@pytest.fixture
+def main_thread_setup(tmp_path, monkeypatch):
+    yield from _counters(tmp_path, monkeypatch, start_thread=False)
 
 
 def call(tx, cmd, payload=None):
@@ -376,3 +397,64 @@ def test_ctrl_c_in_run_closes_the_run_and_releases_the_board(setup, tmp_path, ca
     caplog.clear()
     sat.reentry()
     assert [r.getMessage() for r in caplog.records if "failed" in r.getMessage()] == []
+
+
+# --------------------------------------------------------------- round 3
+def start_slow_scan(sat, tx, fake, chip):
+    rep = call(tx, "qinj_scurve", [{"pixels": [list(PIXEL)], "qsels": [9], "method": "sweep",
+                                     "dac_min": 470, "dac_max": 560, "step": 1}])
+    assert rep.verb_type == OK
+    deadline = time.monotonic() + 10
+    while (call(tx, "get_scan_status").payload or {}).get("points", 0) < 2:
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    assert fake.pattern and 0x5 in fake.pattern
+
+
+def test_second_ctrl_c_during_the_scan_restore_is_ignored(main_thread_setup, caplog):
+    sat, tx, fake, chip, config, pump = main_thread_setup
+    initial = chip.snapshot()
+    launch(sat, tx, config)
+    start_slow_scan(sat, tx, fake, chip)
+    scan_thread = sat._scan_thread
+    join = scan_thread.join
+    interrupted = []
+
+    def join_with_ctrl_c(timeout=None):
+        if not interrupted:
+            interrupted.append(timeout)
+            raise KeyboardInterrupt
+        return join(timeout)
+
+    scan_thread.join = join_with_ctrl_c
+    chip.write_delay = 0.2  # the register restore is still running when the second Ctrl-C lands
+    interrupt_main_loop(sat)
+    assert not run_main_loop(sat, pump), "KeyboardInterrupt escaped the shutdown"
+    assert interrupted
+    assert not scan_thread.is_alive()
+    assert chip.snapshot() == initial
+    assert no_qinj_playing(fake)
+    assert sat._link is None and chip.closed
+    assert any("Ctrl-C ignored: shutdown in progress" in r.getMessage() for r in caplog.records)
+
+
+def test_fail_gracefully_on_a_stalled_board_reports_unknown(setup):
+    sat, tx, fake, _, config = setup
+    launch(sat, tx, config)
+    fake.stall(on_fifo_read=False)
+    t0 = time.monotonic()
+    text = sat.fail_gracefully()
+    assert "UNKNOWN" in text, text
+    assert "fast commands idle" not in text.lower(), text
+    assert time.monotonic() - t0 < 4 * QUIESCE_IO_TIMEOUT_S + sat.RELEASE_JOIN_TIMEOUT_S
+    assert sat._link is None
+
+
+def test_kc705_register_reconfigure_restarts_the_settle_count(setup):
+    sat, tx, fake, _, config = setup
+    launch(sat, tx, config | {"settle_windows": 20})
+    wait_settled(tx, timeout=10.0)
+    assert call(tx, "reconfigure", {"kc705_registers": {"triggerbit_delay": 0x1900}}).verb_type == OK
+    wait_state(sat, SatelliteState.ORBIT)
+    assert call(tx, "read_counters").payload["settled"] is False
+    assert wait_settled(tx, timeout=10.0)["settled"]

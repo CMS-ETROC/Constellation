@@ -22,16 +22,17 @@ _WAVEFORM_MEMO_WORDS = {"QInj", "L1A", "L1ARange", "BCR", "Triggerbit", "Start",
 _REPEATED_RE = re.compile(r"^repeatedQInj(=\d+)?$")
 
 
-# I/O timeout for the stop/idle writes of a shutdown, so a dead board cannot hold it for socket_timeout
-QUIESCE_IO_TIMEOUT_S = 2.0
+# do_run polls the WS-ready bit for up to this long before an event is skipped
+WS_READY_POLL_S = 5.0
+# batch_ws_read_data: 1024 x (I2C write + read) per chip. About 20 s per chip per event according to
+# notes/review-sw-kc705-constellation-i2cgui-waferprobe.md; not timed on the bench yet.
+WS_READ_S_PER_CHIP = 20.0
 
 
 class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_SATELLITES_VERSION):
     """Waveform-sampler readout: configures the ETROC2 over I2C and saves one CSV per trigger."""
 
     REQUIRED_KEYS = REQUIRED_KEYS["EtrocWaveform"]
-    # do_run polls the WS-ready bit for up to 5 s before it checks stop_requested() again
-    REENTRY_JOIN_TIMEOUT_S = 8.0
 
     DEFAULT_CONFIG = {
         "hostname": "192.168.2.3",
@@ -250,11 +251,13 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
             before_check = time.monotonic()
             ws_ready = False
 
-            while (time.monotonic() - before_check < 5):
+            while time.monotonic() - before_check < WS_READY_POLL_S and not self.stop_requested():
                 if cmd_interpret.read_status_reg(self.connection_socket, 0) & 1:
                     ws_ready = True
                     time.sleep(0.1)
                     break
+            if self.stop_requested():
+                break
 
             # Check the flag after the loop finishes
             if not ws_ready:
@@ -310,18 +313,36 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         return self._reconfigure_kc705(plan)
 
     # ------------------------------------------------------- ERROR and Ctrl-C
+    def _reentry_join_timeout(self) -> float:
+        """An event in progress finishes its WS-ready poll and the I2C read of every chip."""
+        chips = len(getattr(self, "chip_addresses", None) or [None])
+        bound = WS_READY_POLL_S + chips * WS_READ_S_PER_CHIP + 1.0
+        self.log.info(
+            f"Run-thread bound {bound:.0f} s = WS-ready poll {WS_READY_POLL_S:.0f} s + {chips} chip(s) x "
+            f"{WS_READ_S_PER_CHIP:.0f} s WS read + 1 s"
+        )
+        return bound
+
+    def _verify_reg15_restored(self) -> str:
+        reg15 = cmd_interpret.read_config_reg(self.connection_socket, cmd_interpret.CONFIG_REGISTERS["active_channel"])
+        if reg15 != self.active_channel:
+            raise RuntimeError(f"Reg15 reads 0x{reg15:04x}, expected active_channel 0x{self.active_channel:04x}")
+        return f"Reg15 restored to active_channel 0x{reg15:04x}"
+
     def _quiesce(self, reason: str) -> str:
-        """Restore Reg15 if a run set the WS channel, idle the fast commands, close socket and I2C (idempotent)."""
-        sock = getattr(self, "connection_socket", None)
-        if sock is not None:
-            run_step(self.log, f"Shortening the KC705 I/O timeout ({reason})", sock.settimeout, QUIESCE_IO_TIMEOUT_S)
-            if getattr(self, "_ws_run_active", False):
-                run_step(self.log, f"Restoring active_channel after the run ({reason})", self.do_stopping)
-            run_step(self.log, f"Idling the fast commands ({reason})", self.configure_memo_FC, "Triggerbit")
-            run_step(self.log, f"Closing the KC705 connection ({reason})", self._close_connection)
-        run_step(self.log, f"Releasing the I2C adapter ({reason})", self._close_i2c)
-        return "fast commands idle, KC705 connection and I2C adapter closed"
+        """Restore Reg15 if a run set the WS channel, idle the fast commands, read back, close socket and I2C."""
+        steps = []
+        if getattr(self, "_ws_run_active", False):
+            steps.append(("Reg15 restore", self.do_stopping, self._verify_reg15_restored))
+        text = self._kc705_quiesce(reason, steps)
+        if self.__dict__.get("_run_thread_stuck"):
+            return text + "; I2C adapter left open (the run thread may still be reading the waveform sampler)"
+        if getattr(self, "i2c_conn", None) is None:
+            return text
+        closed = run_step(self.log, f"Releasing the I2C adapter ({reason})", self._close_i2c)
+        return text + ("; I2C adapter closed" if closed else "; releasing the I2C adapter failed")
 
     def fail_gracefully(self) -> str:
-        """Entering ERROR: idle the fast commands, release the KC705 connection and the I2C adapter."""
+        """Entering ERROR: restore Reg15, idle the fast commands, release the KC705 connection and the I2C adapter."""
+        self._settle_run_thread(0.0)
         return "Failed gracefully: " + self._quiesce_locked("failure")

@@ -6,6 +6,7 @@ EtrocWaveform reconfigure and Ctrl-C reentry over loopback CSCP, against the sim
 and a stand-in for the i2c_gui2 connection (no USB-ISS).
 """
 
+import logging
 import threading
 import time
 
@@ -144,11 +145,19 @@ def test_ctrl_c_in_run_restores_registers_and_releases_i2c(setup, caplog):
     with fake.lock:
         assert fake.config[15] == WS_ACTIVE_CHANNEL
     assert qinj_playing(fake)
+    with fake.lock:
+        assert fake.ws_ready == 0  # do_starting cleared the WS block: do_run is in its ws_ready poll
 
+    caplog.clear()
+    t0 = time.monotonic()
     ctrl_c(sat, thread)
+    elapsed = time.monotonic() - t0
 
     # do_run returned on stop_requested(), it did not die on the released socket
     assert sat.fsm.state != SatelliteState.ERROR
+    # the run thread stopped within the join bound: no "did not stop" error, no socket release
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert elapsed < sat._reentry_join_timeout()
     with fake.lock:
         assert fake.config[15] == ACTIVE_CHANNEL
     assert not qinj_playing(fake)

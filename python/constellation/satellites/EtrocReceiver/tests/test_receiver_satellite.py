@@ -101,6 +101,15 @@ def test_output_path_needs_a_landing(setup, tmp_path):
     assert sat.fsm.state == SatelliteState.ORBIT
 
 
+def test_reconfigure_of_a_framework_section_is_refused_in_orbit(setup):
+    sat, tx, _ = setup
+    rep = call(tx, "reconfigure", {"_data": {"receive_from": ["Other"]}})
+    assert rep.verb_type != OK
+    assert "framework sections (_data)" in rep.verb_msg and "re-initialize" in rep.verb_msg
+    time.sleep(0.2)
+    assert sat.fsm.state == SatelliteState.ORBIT
+
+
 def test_ctrl_c_in_run_closes_the_file_with_the_last_lines(setup, tmp_path, caplog):
     sat, tx, thread = setup
     assert call(tx, "start", "run_ctrl_c").verb_type == OK

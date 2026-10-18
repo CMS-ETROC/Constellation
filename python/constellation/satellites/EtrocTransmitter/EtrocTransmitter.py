@@ -3,6 +3,7 @@ SPDX-FileCopyrightText: 2025 DESY and the Constellation authors
 SPDX-License-Identifier: EUPL-1.2
 """
 
+import logging
 import time
 from typing import Any
 
@@ -12,13 +13,9 @@ from constellation.core.transmitter_satellite import TransmitterSatellite
 from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
 from ..EtrocCommon.commands import KC705RegisterCommands
 from ..EtrocCommon.config import load_typed_config
-from ..EtrocCommon.lifecycle import EtrocLifecycle, run_step
+from ..EtrocCommon.lifecycle import EtrocLifecycle
 from ..EtrocCommon.reconfigure import EtrocReconfigure
 from ..EtrocCommon.satellite_types import REQUIRED_KEYS
-
-# I/O timeout for the stop/idle writes of a shutdown, so a dead board cannot hold it for socket_timeout
-QUIESCE_IO_TIMEOUT_S = 2.0
-
 
 class EtrocTransmitter(
     KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, TransmitterSatellite, version=ETROC_SATELLITES_VERSION
@@ -135,11 +132,12 @@ class EtrocTransmitter(
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
         time.sleep(0.1)
 
-        self.log.debug(f"Status of DAQ Toggle before Start Pulse: {format(cmd_interpret.read_status_reg(self.connection_socket, 5), '016b')}")
-        cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "start_DAQ")
+        self._log_daq_toggle("before Start Pulse")
+        # set before the pulse: a shutdown racing this start then sends a (harmless) stop_DAQ
         self._daq_started = True
+        cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "start_DAQ")
         time.sleep(0.1)
-        self.log.debug(f"Status of DAQ Toggle after Start Pulse: {format(cmd_interpret.read_status_reg(self.connection_socket, 5), '016b')}")
+        self._log_daq_toggle("after Start Pulse")
 
         return f"Run {run_identifier} Session Started"
 
@@ -197,18 +195,35 @@ class EtrocTransmitter(
                 regs[f"reg{reg}_{name}"] = f"0x{cmd_interpret.read_config_reg(self.connection_socket, reg):04x}"
         return regs
 
-    def _stop_daq(self) -> None:
-        """The stop sequence of do_stopping: timestamp register, then the stop_DAQ pulse."""
-        # Bitwise logic: Clear the bottom 2 bits (~0b11) and set them to '10' (0b10)
+    def _stop_daq(self, log_toggle: bool = True) -> None:
+        """The stop sequence of do_stopping: timestamp register, then the stop_DAQ pulse; no read before the pulse."""
+        # Bitwise logic: Clear the bottom 2 bits (~0b11) and set them to '10' (0b10): status page 2
         self.timestamp = (self.timestamp & ~0b11) | 0b10
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
         time.sleep(0.1)
-
-        self.log.debug(f"Status of DAQ Toggle before Stop Pulse: {format(cmd_interpret.read_status_reg(self.connection_socket, 5), '016b')}")
         cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "stop_DAQ")
         self._daq_started = False
         time.sleep(0.1)
-        self.log.debug(f"Status of DAQ Toggle after Stop Pulse: {format(cmd_interpret.read_status_reg(self.connection_socket, 5), '016b')}")
+        if log_toggle:
+            self._log_daq_toggle("after Stop Pulse")
+
+    def _log_daq_toggle(self, when: str) -> None:
+        """Status page 2 word 5 ({0x0F17, session_DAQ_on, hist_fill_done}), read only when DEBUG is on."""
+        if self.log.isEnabledFor(logging.DEBUG):
+            try:
+                word = cmd_interpret.read_status_reg(self.connection_socket, 5)
+            except OSError as e:
+                # diagnostics only: the pulse is already out, the caller's read-back decides the state
+                self.log.warning(f"Status of DAQ Toggle {when} not read: {type(e).__name__}: {e}")
+                return
+            self.log.debug(f"Status of DAQ Toggle {when}: {word:016b}")
+
+    def _verify_daq_stopped(self) -> str:
+        """session_DAQ_on (status page 2 word 5 bit 1; _stop_daq selected page 2) must read 0."""
+        word = cmd_interpret.read_status_reg(self.connection_socket, 5)
+        if (word >> 1) & 1:
+            raise RuntimeError(f"session_DAQ_on still 1 after stop_DAQ (status word 5 = 0x{word:04x})")
+        return "DAQ stopped (session_DAQ_on = 0)"
 
     def _close_connection(self) -> None:
         """Close the KC705 TCP connection if one is open."""
@@ -224,18 +239,12 @@ class EtrocTransmitter(
 
     # ------------------------------------------------------- ERROR and Ctrl-C
     def _quiesce(self, reason: str) -> str:
-        """Stop the DAQ if a run started it, idle the fast commands, close the socket (idempotent)."""
-        sock = getattr(self, "connection_socket", None)
-        if sock is None:
-            return "KC705 connection already closed"
-        run_step(self.log, f"Shortening the KC705 I/O timeout ({reason})", sock.settimeout, QUIESCE_IO_TIMEOUT_S)
+        """Stop the DAQ if a run started it, idle the fast commands, read back, close (idempotent)."""
+        steps = []
         if getattr(self, "_daq_started", False):
-            if run_step(self.log, f"Stopping the DAQ ({reason})", self._stop_daq):
-                self.log.info(f"DAQ stopped on {reason}")
-        if run_step(self.log, f"Idling the fast commands ({reason})", self.configure_memo_FC, "Triggerbit"):
-            self.log.info(f"Fast commands idle on {reason}")
-        run_step(self.log, f"Closing the KC705 connection ({reason})", self._close_connection)
-        return "DAQ stopped, fast commands idle, KC705 connection closed"
+            # no DEBUG toggle read here: on a board that stopped answering it would only add a timeout
+            steps.append(("stop_DAQ", lambda: self._stop_daq(log_toggle=False), self._verify_daq_stopped))
+        return self._kc705_quiesce(reason, steps)
 
     def _stop_transport_for_reentry(self) -> None:
         """Stop the CDTP push thread (non-daemon) without waiting for the queue to drain; no EOR is sent."""
@@ -244,10 +253,12 @@ class EtrocTransmitter(
         if thread is None or not thread.is_alive():
             return
         dtm._stopevt.set()
+        self.log.warning(f"Waiting up to {self.REENTRY_JOIN_TIMEOUT_S:.1f} s for the CDTP push thread")
         thread.join(timeout=self.REENTRY_JOIN_TIMEOUT_S)
         if thread.is_alive():
             self.log.error("CDTP push thread still sending after reentry; it ends at its data_timeout")
 
     def fail_gracefully(self) -> str:
         """Entering ERROR: stop the DAQ, idle the fast commands and release the connection for a later initialize."""
+        self._settle_run_thread(0.0)
         return "Failed gracefully: " + self._quiesce_locked("failure")

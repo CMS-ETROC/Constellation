@@ -28,8 +28,9 @@ from constellation.core.protocol.cscp1 import SatelliteState
 from constellation.core.satellite import Satellite
 
 from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
+from ..EtrocCommon.commands import FENCE_REGISTER, QUIESCE_IO_TIMEOUT_S
 from ..EtrocCommon.config import load_typed_config
-from ..EtrocCommon.lifecycle import EtrocLifecycle, run_step
+from ..EtrocCommon.lifecycle import CTRL_C_IGNORED, EtrocLifecycle, run_step, shutdown_text
 from ..EtrocCommon.reconfigure import EtrocReconfigure
 from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 from .chipio import POWER_MODES
@@ -309,21 +310,105 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         return f"Run stopped after {n} windows"
 
     def fail_gracefully(self) -> str:
-        return self._quiesce_locked("failure")
+        self._settle_run_thread(0.0)
+        return "Failed gracefully: " + self._quiesce_locked("failure")
+
+    def _stop_scan_for_shutdown(self, reason: str) -> bool:
+        """Stop a scan and wait for its pixel-register restore; a Ctrl-C during the wait is ignored once."""
+        for attempt in (1, 2):
+            try:
+                return self._stop_scan(join=True)
+            except KeyboardInterrupt:
+                self.log.warning(f"{CTRL_C_IGNORED} (scan stop, {reason}); waiting for the pixel-register restore again")
+            except Exception as e:
+                self.log.warning(f"Stopping the scan ({reason}) failed: {type(e).__name__}: {e}")
+                break
+        return not self._busy()
+
+    def _stop_poller_for_shutdown(self) -> None:
+        """Stop the ORBIT poller; one blocked in a read on a stalled board gets its link closed."""
+        self._poller_stop.set()
+        poller = self._poller
+        if poller is None or poller is threading.current_thread():
+            return
+        self.log.info(f"Waiting up to {QUIESCE_IO_TIMEOUT_S} s for the counter poller to stop")
+        poller.join(timeout=QUIESCE_IO_TIMEOUT_S)
+        if poller.is_alive():
+            self._release_run_thread_io()
+            poller.join(timeout=self.RELEASE_JOIN_TIMEOUT_S)
+        if not poller.is_alive():
+            self._poller = None
+
+    def _release_run_thread_io(self) -> None:
+        """Shut down the link socket a blocked thread reads from (without its lock, which that thread holds).
+
+        Closed only once that thread is gone (`_close_released_sockets`), so its descriptor cannot be
+        reused by the fresh connection while the thread is still inside recv.
+        """
+        link = self._link
+        sock = None if link is None else link.sock
+        if sock is None:
+            return
+        self.log.warning("Shutting down the KC705 link a blocked thread reads from; the shutdown uses a fresh one")
+        cmd_interpret.shutdown_socket(sock)
+        self.__dict__.setdefault("_released_sockets", []).append(sock)
+        link.sock = None
+        self._reopen_for_quiesce = True
+
+    def _close_released_sockets(self) -> None:
+        poller = self._poller
+        if self.__dict__.get("_run_thread_stuck") or (poller is not None and poller.is_alive()):
+            return
+        for sock in self.__dict__.pop("_released_sockets", []):
+            cmd_interpret.close_socket(sock)
 
     def _quiesce(self, reason: str) -> str:
-        """Stop a scan, end the run files, idle the fast commands, release KC705 and I2C (idempotent)."""
-        try:
-            stopped = self._stop_scan(join=True)
-        except Exception as e:
-            self.log.warning(f"Stopping the scan ({reason}) failed: {type(e).__name__}: {e}")
-            stopped = not self._busy()
-        run_step(self.log, f"Closing the run files ({reason})", self._end_run_files, reason)
+        """Stop a scan, end the run files, idle the fast commands, read back, release KC705 and I2C (idempotent)."""
+        log = self.log
+        stopped = self._stop_scan_for_shutdown(reason)
+        run_step(log, f"Stopping the counter poller ({reason})", self._stop_poller_for_shutdown)
+        reopen = self.__dict__.pop("_reopen_for_quiesce", False)
+        run_step(log, f"Closing the run files ({reason})", self._end_run_files, reason)
         if not stopped:
-            return "Failed; scan thread still running, KC705 and I2C left open for its register restore"
-        run_step(self.log, f"Idling the fast commands ({reason})", self._idle_fc_quietly, reason)
-        run_step(self.log, f"Releasing KC705 and I2C ({reason})", self._release)
-        return "Failed gracefully, fast commands idle, KC705 connection closed"
+            return "scan thread still running: KC705 and I2C left open for its register restore; FC state UNKNOWN"
+        link = self._link
+        if self.__dict__.get("_run_thread_stuck"):
+            released = run_step(log, f"Releasing KC705 and I2C ({reason})", self._release)
+            return "run thread still running: KC705 register traffic skipped; DAQ/FC state UNKNOWN" + (
+                "" if released else "; releasing KC705 and I2C failed"
+            )
+        if link is None or not link.is_open:
+            if link is None or not reopen:
+                run_step(log, f"Releasing KC705 and I2C ({reason})", self._release)
+                return "KC705 link already closed"
+
+            def reopen_link() -> None:
+                link.connect_timeout = link.io_timeout = QUIESCE_IO_TIMEOUT_S
+                link.open()
+
+            if not run_step(log, f"Opening a fresh KC705 connection ({reason})", reopen_link):
+                run_step(log, f"Releasing KC705 and I2C ({reason})", self._release)
+                return "no KC705 connection for the shutdown; DAQ/FC state UNKNOWN"
+        else:
+            run_step(log, f"Shortening the KC705 I/O timeout ({reason})", link.sock.settimeout, QUIESCE_IO_TIMEOUT_S)
+        failed = []
+        fc_idle = run_step(
+            log, f"Idling the fast commands ({reason})", link.configure_fc, FC_MODES["idle"], self.prescale_factor
+        )
+        if fc_idle:
+            self._fc_mode = "idle"
+        else:
+            failed.append("FC idle")
+        log.info(f"Reading Reg{FENCE_REGISTER} back to confirm the shutdown writes (waits up to {QUIESCE_IO_TIMEOUT_S} s)")
+        answered = run_step(
+            log, f"Reading back Reg{FENCE_REGISTER} after the shutdown writes ({reason})", link.read_config, FENCE_REGISTER
+        )
+        released = run_step(log, f"Releasing KC705 and I2C ({reason})", self._release)
+        run_step(log, f"Closing the shut-down KC705 connections ({reason})", self._close_released_sockets)
+        return shutdown_text(
+            ["fast commands idle"] if fc_idle else [], answered, failed,
+            ["KC705 connection and I2C closed" if released else "releasing KC705 and I2C failed"],
+        )
 
     def _end_run_files(self, reason: str) -> None:
         """Close the run files of a run that did not end with stop; run.json records why."""
@@ -347,6 +432,8 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
             self.kc705_registers.update(plan["kc705_registers"])
             self._effective_config["kc705_registers"] = dict(self.kc705_registers)
             self._write_kc705_registers(plan["kc705_registers"])
+            # the window being latched straddles the write: count from here, as for a channel change
+            self._mark_change()
             changes += [f"kc705_registers.{k} = 0x{v:04x}" for k, v in plan["kc705_registers"].items()]
         if "channel" in plan:
             self._reader.set_channel(self.channel)
@@ -356,7 +443,11 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
             # a new prescale factor reaches the board with the next FC memory programming
             mode = plan.get("fc_mode_on_launch", self._fc_mode)
             self._apply_fc_mode(mode)
-            changes.append(f"FC {self._fc_mode} (prescale {self.prescale_factor})")
+            changes.append(
+                f"FC {self._fc_mode} (prescale {self.prescale_factor}; the Reg10 prescale bits are unused by the "
+                f"KC705 SEU2025 firmware according to its notes, see README)"
+                if "prescale_factor" in plan else f"FC {self._fc_mode}"
+            )
         if self._engine is not None:
             self._engine.settle_windows = self.settle_windows
             self._engine.l1a_delay = self.l1a_delay
@@ -524,7 +615,9 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
 
     def _is_settled(self, window: CounterWindow) -> bool:
         if self._settle_ref is None:
-            return True
+            # the refresh read at the last change failed: count settle_windows from this window on
+            self._settle_ref = window.refresh
+            return False
         delta = refresh_delta(window.refresh, self._settle_ref)
         if delta >= 0x8000:
             # refresh restarted (counter reset or link re-alignment): count from the new value
@@ -627,7 +720,9 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
             return True
         if join:
             # one point takes at most (settle_windows + 2) windows + 1 s, plus the register restore
-            thread.join(timeout=(self.settle_windows + 3) * self.firmware_window_s + 30.0)
+            bound = (self.settle_windows + 3) * self.firmware_window_s + 30.0
+            self.log.warning(f"Waiting up to {bound:.0f} s for the scan to stop and restore the pixel registers")
+            thread.join(timeout=bound)
             if thread.is_alive():
                 self.log.critical("Scan thread did not stop; pixel registers may not be restored yet")
                 return False

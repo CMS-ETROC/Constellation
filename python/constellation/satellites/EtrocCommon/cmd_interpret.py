@@ -130,6 +130,19 @@ def close_socket(sock):
         pass
     sock.close()
 
+def shutdown_socket(sock):
+    """Shut a socket down without closing it: a recv blocked in another thread returns at once.
+
+    The descriptor stays open, so the OS cannot hand its number to a new connection while that
+    thread still uses it; close it with close_socket once the thread is gone.
+    """
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
 def _recv_exact(sock, num_bytes):
     """Receive exactly num_bytes; returns the bytes received so far if the peer closes."""
     data = bytearray()

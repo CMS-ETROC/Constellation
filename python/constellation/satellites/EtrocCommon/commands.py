@@ -22,8 +22,16 @@ from constellation.core.commandmanager import cscp_requestable
 from constellation.core.protocol.cscp1 import SatelliteState
 
 from . import cmd_interpret, fast_command
+from .lifecycle import run_step, shutdown_text
 
 ORBIT = [SatelliteState.ORBIT]
+
+# I/O timeout for the stop/idle writes and the read-back of a shutdown, so a dead board cannot hold it
+# for socket_timeout
+QUIESCE_IO_TIMEOUT_S = 2.0
+# Config register read after the shutdown writes: the firmware handles commands in order, so an
+# answer proves the earlier writes were executed (Reg13 = timestamp / status page select)
+FENCE_REGISTER = 13
 
 
 class KC705RegisterCommands:
@@ -38,6 +46,8 @@ class KC705RegisterCommands:
         "counter_duration", "fc_delays", "data_delays_01", "data_delays_23",
     )
     PRESCALE_FACTORS = (2048, 4096, 8192, 16384)
+    # read_data_fifo carries Cnt - 1 in a 16-bit field
+    FIFO_READ_RANGE = (1, 65536)
 
     @cscp_requestable(ORBIT)
     def get_config_register(self, reg: int) -> tuple[str, Any, dict]:
@@ -156,13 +166,20 @@ class KC705RegisterCommands:
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "register_10", 0x000, self.prescale_factor)
 
     def _validate_kc705_settings(self, values: dict[str, Any]) -> None:
-        """Check prescale_factor and fast_command_memo if present (initialize and reconfigure)."""
+        """Check the KC705 keys present (initialize: all; reconfigure: the changed ones)."""
         if "prescale_factor" in values and values["prescale_factor"] not in self.PRESCALE_FACTORS:
             raise ValueError(
                 f"Prescale factor must be one of {list(self.PRESCALE_FACTORS)}, {values['prescale_factor']} not supported"
             )
         if "fast_command_memo" in values:
             self._check_memo(values["fast_command_memo"])
+        lo, hi = self.FIFO_READ_RANGE
+        if "num_fifo_read" in values and not lo <= values["num_fifo_read"] <= hi:
+            # 0 would encode a write to firmware address 24, above 65536 the count spills into the address
+            raise ValueError(f"num_fifo_read must be {lo}-{hi}, got {values['num_fifo_read']}")
+        for name in self.LAUNCH_REGISTERS:
+            if name in values and not 0 <= values[name] <= 0xFFFF:
+                raise ValueError(f"{name} must be a 16-bit register value 0-0xFFFF, got {values[name]}")
 
     def _reconfigure_kc705(self, plan: dict[str, Any]) -> list[str]:
         """Apply reconfigured keys the way do_launching does; registers are read back. Returns the changes."""
@@ -174,13 +191,101 @@ class KC705RegisterCommands:
         for name in registers:
             reg = cmd_interpret.CONFIG_REGISTERS[name]
             readback = cmd_interpret.read_config_reg(self.connection_socket, reg)
+            if readback != getattr(self, name):
+                raise RuntimeError(
+                    f"{name}: wrote 0x{getattr(self, name):04x} to Reg{reg} but read back 0x{readback:04x}; "
+                    f"the board did not take the value"
+                )
             changes.append(f"{name} = 0x{getattr(self, name):04x} (Reg{reg} read back 0x{readback:04x})")
         if "prescale_factor" in plan:
             self._write_prescale()
-            changes.append(f"prescale_factor = {self.prescale_factor}")
+            changes.append(
+                f"prescale_factor = {self.prescale_factor} (Reg10 prescale bits; unused by the KC705 SEU2025 "
+                f"firmware according to its notes, see README)"
+            )
         if "fast_command_memo" in plan or "prescale_factor" in plan:
             self.configure_memo_FC()
             changes.append(f"FC memory reprogrammed from '{self.fast_command_memo}'")
         handled = set(registers) | {"prescale_factor", "fast_command_memo"}
         changes += [f"{key} = {value!r}" for key, value in plan.items() if key not in handled]
         return changes
+
+    # ------------------------------------------------------- ERROR and Ctrl-C
+    def _release_run_thread_io(self) -> None:
+        """Shut down the KC705 socket a blocked run thread reads from (its recv returns at once).
+
+        The socket is closed only after the run thread is gone (`_close_released_sockets`): closing
+        it under a thread inside recv lets the OS reuse the descriptor for the fresh connection.
+        """
+        sock = getattr(self, "connection_socket", None)
+        if sock is None:
+            return
+        self.log.warning("Shutting down the KC705 connection the run thread is blocked on; the stop sequence uses a fresh one")
+        cmd_interpret.shutdown_socket(sock)
+        self.__dict__.setdefault("_released_sockets", []).append(sock)
+        self.connection_socket = None
+        self._reopen_for_quiesce = True
+
+    def _close_released_sockets(self) -> None:
+        """Close the sockets `_release_run_thread_io` shut down, unless the run thread may still use them."""
+        if self.__dict__.get("_run_thread_stuck"):
+            return
+        for sock in self.__dict__.pop("_released_sockets", []):
+            cmd_interpret.close_socket(sock)
+
+    def _open_quiesce_connection(self) -> None:
+        self.connection_socket = cmd_interpret.open_socket(
+            self.hostname, self.port, QUIESCE_IO_TIMEOUT_S, QUIESCE_IO_TIMEOUT_S
+        )
+
+    def _fence_read(self) -> None:
+        cmd_interpret.read_config_reg(self.connection_socket, FENCE_REGISTER)
+
+    def _kc705_quiesce(self, reason: str, steps: list[tuple[str, Any, Any]]) -> str:
+        """Shutdown writes on the KC705, then one read-back; returns what was verified.
+
+        `steps` run before the FC idle, each (label, action, verify): `verify()` runs only after
+        the read-back answered and returns the text to report, or raises if the state is wrong.
+        Every write goes out before the first read, so a board that stopped answering still gets
+        them. A state is claimed only when the read-back answered.
+        """
+        log = self.log
+        reopen = self.__dict__.pop("_reopen_for_quiesce", False)
+        if self.__dict__.get("_run_thread_stuck"):
+            run_step(log, f"Closing the KC705 connection ({reason})", self._close_connection)
+            return "run thread still running: KC705 register traffic skipped; DAQ/FC state UNKNOWN"
+        sock = getattr(self, "connection_socket", None)
+        if sock is None:
+            if not reopen:
+                return "KC705 connection already closed"
+            if not run_step(log, f"Opening a fresh KC705 connection ({reason})", self._open_quiesce_connection):
+                run_step(log, f"Closing the shut-down KC705 connections ({reason})", self._close_released_sockets)
+                return "no KC705 connection for the stop sequence; DAQ/FC state UNKNOWN"
+        else:
+            run_step(log, f"Shortening the KC705 I/O timeout ({reason})", sock.settimeout, QUIESCE_IO_TIMEOUT_S)
+        done, failed = [], []
+        for label, action, verify in steps:
+            if run_step(log, f"{label} ({reason})", action):
+                done.append((label, verify))
+            else:
+                failed.append(label)
+        fc_idle = run_step(log, f"Idling the fast commands ({reason})", self.configure_memo_FC, "Triggerbit")
+        if not fc_idle:
+            failed.append("FC idle")
+        log.info(f"Reading Reg{FENCE_REGISTER} back to confirm the shutdown writes (waits up to {QUIESCE_IO_TIMEOUT_S} s)")
+        answered = run_step(log, f"Reading back Reg{FENCE_REGISTER} after the shutdown writes ({reason})", self._fence_read)
+        verified = []
+        if answered:
+            for label, verify in done:
+                text = {}
+                if run_step(log, f"Checking {label} ({reason})", lambda: text.update(t=verify())):
+                    verified.append(text["t"])
+                else:
+                    failed.append(f"{label} not confirmed")
+            if fc_idle:
+                verified.append("fast commands idle")
+        closed = run_step(log, f"Closing the KC705 connection ({reason})", self._close_connection)
+        run_step(log, f"Closing the shut-down KC705 connections ({reason})", self._close_released_sockets)
+        return shutdown_text(
+            verified, answered, failed, ["KC705 connection closed" if closed else "closing the KC705 connection failed"]
+        )

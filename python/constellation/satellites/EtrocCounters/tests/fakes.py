@@ -53,6 +53,51 @@ def pixel_counts(fields: dict[str, int], bl: int, nw: int, injections: int, head
     return trig, data
 
 
+def pump_tasks(sat, stop) -> None:
+    """Run the satellite's queued tasks (the FSM transitions) until `stop` is set; stands in for run_satellite,
+    so that a test can later call run_satellite on the main thread, where Ctrl-C lands."""
+    import queue
+
+    while not stop.is_set():
+        try:
+            callback, args = sat.task_queue.get(timeout=0.05)
+        except queue.Empty:
+            continue
+        callback(*args)
+
+
+def start_task_pump(sat):
+    import threading
+
+    stop = threading.Event()
+    thread = threading.Thread(target=pump_tasks, args=(sat, stop), daemon=True)
+    thread.stop_evt = stop
+    thread.start()
+    return thread
+
+
+def run_main_loop(sat, pump) -> bool:
+    """Stop the task pump, then run_satellite on the calling (main) thread; True if a KeyboardInterrupt escaped it."""
+    pump.stop_evt.set()
+    pump.join(5.0)
+    try:
+        sat.run_satellite()
+    except KeyboardInterrupt:
+        return True
+    return False
+
+
+def interrupt_main_loop(sat) -> None:
+    """The next task_queue.get raises KeyboardInterrupt, as Ctrl-C in the main loop does."""
+    get = sat.task_queue.get
+
+    def interrupted(*args, **kwargs):
+        sat.task_queue.get = get
+        raise KeyboardInterrupt
+
+    sat.task_queue.get = interrupted
+
+
 class FakeChip:
     """In-memory ETROC2 pixel matrix implementing ChipIO."""
 
@@ -159,9 +204,18 @@ class FakeKC705:
         self.pattern: list[int] | None = None
         self.fc_version = 0
         self.received: list[tuple[str, int, int]] = []
-        # DAQ toggled by the start_DAQ / stop_DAQ pulses; data-FIFO reads answer FIFO fillers
+        # DAQ toggled by the start_DAQ / stop_DAQ pulses (session_DAQ_on, status page 2 word 5 bit 1);
+        # data-FIFO reads answer FIFO fillers
         self.daq_running = False
         self.fifo_reads = 0
+        # waveform-sampler ready bit (status page 0, word 0 bit 0); fifo_reset and ws_clear_pulse clear it
+        self.ws_ready = 1
+        # stall mode (KC7-FW-002): a FIFO read that never completes blocks every later command on the
+        # firmware's single command stream. Held words are kept with their connection number, unexecuted.
+        self.stall_on_fifo_read = False
+        self.stalled = False
+        self.held: list[tuple[int, int]] = []
+        self.connections = 0
         self.refresh = [0, 0, 0, 0]
         self.latched = [dict(data=0, header=0, trig=0, combine=0) for _ in range(4)]
         self.lock = threading.RLock()
@@ -246,10 +300,12 @@ class FakeKC705:
             c = self.latched[ch]
             return concat([
                 (16, c["combine"]), (32, c["trig"]), (16, self.refresh[ch]), (32, c["header"]),
-                (32, c["data"]), (8, 0), (8, led8), (8, 0), (8, 0), (7, 0), (1, 1),
+                (32, c["data"]), (8, 0), (8, led8), (8, 0), (8, 0), (7, 0), (1, self.ws_ready),
             ])
         if page == 2:
-            return concat([(16, 0x3C5C)] * 5 + [(14, 0x0F17), (1, 0), (1, 1), (80, 0x0123_4567_89AB_CDEF_0F0F)])
+            return concat(
+                [(16, 0x3C5C)] * 5 + [(14, 0x0F17), (1, int(self.daq_running)), (1, 1), (80, 0x0123_4567_89AB_CDEF_0F0F)]
+            )
         return 0
 
     def _status_word(self, addr: int) -> int:
@@ -266,6 +322,9 @@ class FakeKC705:
             except OSError:
                 return
             conn.settimeout(0.1)
+            with self.lock:
+                self.connections += 1
+                conn_id = self.connections
             buf = b""
             with conn:
                 while not self._stop.is_set():
@@ -281,6 +340,10 @@ class FakeKC705:
                     while len(buf) >= 4:
                         (word,) = struct.unpack(">I", buf[:4])
                         buf = buf[4:]
+                        with self.lock:
+                            if self.stalled:
+                                self.held.append((conn_id, word))
+                                continue
                         reply = self._handle(word)
                         if isinstance(reply, list):
                             conn.sendall(struct.pack(f">{len(reply)}I", *reply))
@@ -311,15 +374,23 @@ class FakeKC705:
                 return None
             if upper == 0x19:  # read_data_fifo: Cnt = low + 1 words
                 self.fifo_reads += 1
+                if self.stall_on_fifo_read:
+                    self.stall_on_fifo_read = False
+                    self.stalled = True
+                    return None
                 return [(FIFO_FILLER << 20) | (i & 0xFFFFF) for i in range(low + 1)]
             self.received.append(("other", upper, low))
             return None
 
     def _pulse(self, bits: int) -> None:
-        if bits & 0x0002:  # fifo_reset: global reset, stops FC playback and zeroes the counters
+        if bits & 0x0002:  # fifo_reset: global reset, stops FC playback and the DAQ session, zeroes the counters
             self.pattern = None
             self.fc_version += 1
             self.refresh = [0, 0, 0, 0]
+            self.daq_running = False
+            self.ws_ready = 0
+        if bits & 0x1000:  # ws_clear_pulse
+            self.ws_ready = 0
         if bits & 0x0010:  # fc_init: fill [Reg10[11:0], Reg9[11:0]] with Reg12[3:0]
             lo, hi = self.config[10] & 0xFFF, self.config[9] & 0xFFF
             for a in range(lo, hi + 1):
@@ -331,6 +402,28 @@ class FakeKC705:
             self.daq_running = True
         if bits & 0x0400:  # stop_DAQ
             self.daq_running = False
+
+    # --- stall mode ---------------------------------------------------------
+    def stall(self, on_fifo_read: bool = True) -> None:
+        """Stall at the next data-FIFO read (or now): from then on no command is executed or answered."""
+        with self.lock:
+            if on_fifo_read:
+                self.stall_on_fifo_read = True
+            else:
+                self.stalled = True
+
+    def release(self) -> None:
+        """End the stall and execute the held words in order (their replies are dropped)."""
+        with self.lock:
+            self.stalled = False
+            held, self.held = self.held, []
+            for _, word in held:
+                self._handle(word)
+
+    def held_reads(self, conn_id: int) -> list[int]:
+        """Held request words of one connection that expect a reply (status/config reads)."""
+        with self.lock:
+            return [w for c, w in self.held if c == conn_id and (w >> 16) & 0x8000]
 
     # --- inspection -------------------------------------------------------
     def writes_to(self, reg: int) -> list[int]:

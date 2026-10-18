@@ -41,6 +41,12 @@ class EtrocReconfigure:
         """Change configuration keys in ORBIT; keys that need a landing are refused and the satellite stays in ORBIT."""
         if not isinstance(config_dict, dict):
             raise TypeError(f"reconfigure takes a dictionary of keys, got {type(config_dict).__name__}")
+        framework = sorted(k for k in config_dict if isinstance(k, str) and k.startswith("_"))
+        if framework:
+            # e.g. _data, _role: the framework applies those sections only at initialize
+            raise ValueError(
+                f"reconfigure does not change framework sections ({', '.join(framework)}); re-initialize to change them"
+            )
         config_dict = self._match_stored_types(config_dict)
         self._check_reconfigure_allowed()
         self._plan_reconfigure(Configuration(copy.deepcopy(config_dict)))
