@@ -24,6 +24,9 @@ PIXEL_FIELDS = (
     "L1Adelay",
     "CLKEn_THCal",
     "BufEn_THCal",
+    "RSTn_THCal",
+    "ScanStart_THCal",
+    "TH_offset",
     "upperTOATrig",
     "lowerTOATrig",
     "upperTOTTrig",
@@ -49,6 +52,8 @@ OPEN_WINDOWS = {
 }
 
 DAC_MAX = 0x3FF
+# Keys of the wrapper's power_map (disable_all_pixels); an unknown key silently means "high"
+POWER_MODES = ("high", "010", "101", "low")
 QSEL_MAX = 0x1F
 
 
@@ -78,12 +83,14 @@ class I2CGui2ChipIO:
 
     BLOCK = ("ETROC2", "Pixel Config")
 
-    def __init__(self, port: str, chip_address: int, ws_address: int | None = None, chip_name: str = "ETROC2"):
+    def __init__(
+        self, port: str, chip_address: int, ws_address: int | None = None, chip_name: str = "ETROC2", logger=None
+    ):
         # i2c_gui2/pandas/tqdm are only imported when a chip is actually used
         from ..EtrocCommon.new_wrapper_i2cGui2 import i2c_connection
 
         self.chip_address = chip_address
-        self.conn = i2c_connection(port, [chip_address], [ws_address], [chip_name])
+        self.conn = i2c_connection(port, [chip_address], [ws_address], [chip_name], logger=logger)
         self.chip = self.conn.get_chip(chip_address)
 
     def _select(self, row: int, col: int) -> None:
@@ -128,12 +135,15 @@ class I2CGui2ChipIO:
 
     def setup_chip(self, power_mode: str = "high") -> None:
         """PLL/FC calibration, peripherals, all pixels off, second PLL/FC calibration (as the bench needed)."""
+        if power_mode not in POWER_MODES:
+            raise ValueError(f"power_mode must be one of {POWER_MODES}, got '{power_mode}'")
         self.conn.batch_PLL_FC_calibration()
         self.conn.batch_set_chip_peripherals()
         self.conn.batch_disable_all_chips(power_mode=power_mode)
         self.conn.batch_PLL_FC_calibration()
 
     def close(self) -> None:
-        # the wrapper exposes no explicit close; drop the references so the port is released
+        if self.conn is not None:
+            self.conn.close()
         self.chip = None
         self.conn = None

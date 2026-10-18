@@ -208,3 +208,20 @@ def test_repeated_scan_does_not_overwrite_pixel_file(rig):
 def test_bad_scan_parameters_are_rejected(kind, params):
     with pytest.raises(ValueError):
         validate_scan_params(kind, params)
+
+
+def test_stop_requested_before_the_first_point_is_honoured(rig):
+    rig.engine.stop_event.set()
+    with pytest.raises(ScanAborted):
+        rig.engine.noise_scan({"pixels": [list(PIXEL)], "rel_min": -2, "rel_max": 2})
+    assert rig.engine.status["state"] == "aborted"
+    rig.assert_clean()
+
+
+def test_auto_calibration_runs_without_charge_injection(rig):
+    rig.set_fc_mode("qinj_l1a")
+    rig.engine.qinj_scurve({"pixels": [list(PIXEL)], "qsels": [3]})
+    assert rig.chip.autocal_fc_qinj == [False]
+    assert rig.fc_mode == "qinj_l1a"
+    rig.set_fc_mode("idle")
+    rig.assert_clean()

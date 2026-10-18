@@ -158,3 +158,30 @@ def test_handshake_timeout_is_bounded(monkeypatch):
     monkeypatch.setattr(cmd_interpret.socket, "create_connection", no_answer)
     with pytest.raises(ConnectionError, match="did not complete the TCP handshake within 0.5 s"):
         cmd_interpret.open_socket("192.168.2.3", 1024, connect_timeout=0.5)
+
+
+def test_window_latched_during_the_read_is_not_torn():
+    fake = FakeKC705(window_s=60.0).start()  # no automatic latch during the test
+    link = KC705Link("127.0.0.1", fake.port, 2.0, 2.0)
+    link.open()
+    try:
+        old = dict(data=0x11111111, header=0x11111111, trig=0x11111111, combine=0x1111)
+        new = dict(data=0x22222222, header=0x22222222, trig=0x22222222, combine=0x2222)
+        with fake.lock:
+            fake.refresh[0] = 7
+            fake.latched[0] = old
+        latched = []
+
+        def latch_between_word2_and_word3(addr):
+            if addr == 3 and not latched:
+                fake.refresh[0] = 8
+                fake.latched[0] = new
+                latched.append(True)
+
+        fake.on_status_read = latch_between_word2_and_word3
+        w = CounterReader(link, window_s=60.0).read_window()
+        assert latched
+        assert (w.refresh, w.data, w.header, w.trigbit, w.combine) == (8, 0x22222222, 0x22222222, 0x22222222, 0x2222)
+    finally:
+        link.close()
+        fake.stop()

@@ -31,6 +31,9 @@ from typing import Any
 from .chipio import DAC_MAX, OPEN_WINDOWS, QSEL_MAX, ChipIO
 from .counters import WINDOW_S, CounterReader, CounterWindow
 
+# L1Adelay used on the bench with the qinj_l1a pattern (KC7-SW-008: the pattern spaces L1A 0x1f8 BX after QInj)
+QINJ_L1A_SPACING_DEFAULT_DELAY = 0x1F5
+
 CSV_COLUMNS = [
     "scan_id", "scan_type", "phase", "timestamp", "unix_time", "chip_name", "chip_address", "channel",
     "row", "col", "qsel", "charge_fC", "dac", "baseline", "noise_width", "fc_mode",
@@ -298,7 +301,6 @@ class ScanEngine:
         tag = str(params.get("tag", ""))
         if (dac_min is None) != (dac_max is None):
             raise ValueError("give both dac_min and dac_max, or neither")
-        self.stop_event.clear()
 
         with self._scan_files("NoiseScan", dict(params)) as record, self._fc_session("idle"):
             for row, col in pixels:
@@ -353,50 +355,63 @@ class ScanEngine:
         do_off = bool(params.get("turn_off", True))
         turnoff_max = int(params.get("turnoff_dac_max", 1020))
         tag = str(params.get("tag", ""))
-        self.stop_event.clear()
 
-        with self._scan_files(f"QInjSCurve_{method}", dict(params)) as record, self._fc_session("qinj_l1a"):
-            for row, col in pixels:
-                with self._pixel_session(row, col):
-                    bl, nw = self._baseline(row, col, autocal=True)
-                    base_fields = {"disDataReadout": 0, "QInjEn": 1, "disTrigPath": 0, "Bypass_THCal": 1,
-                                   "enable_TDC": 1, "L1Adelay": self.l1a_delay, **OPEN_WINDOWS}
-                    for qsel in qsels:
-                        self.chip.write_pixel(row, col, {**base_fields, "QSel": qsel, "DAC": DAC_MAX})
-                        meta = {"qsel": qsel, "charge_fC": qsel + 1, "baseline": bl, "noise_width": nw}
-                        result: dict[str, Any] = {"row": row, "col": col, "qsel": qsel, "charge_fC": qsel + 1,
-                                                  "baseline": bl, "noise_width": nw, "method": method}
-                        if method == "sweep":
-                            lo = int(params.get("dac_min", bl - 10))
-                            hi = int(params.get("dac_max", bl + 150))
-                            st = int(params.get("step", 2))
-                            dat_path = self._pixel_file(
-                                f"{self.chip_name}_VRef_SCurve_Sweep_Pixel_C{col}_R{row}_QInj_{qsel}{tag}")
-                            record["pixel_files"].append(str(dat_path))
-                            points = []
-                            with open(dat_path, "w") as dat:
-                                for dac in range(max(lo, 0), min(hi, DAC_MAX) + 1, st):
-                                    w = self._measure(row, col, dac, record, {**meta, "phase": "sweep"}, dat)
-                                    points.append((dac, w.trigbit, w.data, w.header))
-                            result.update(summarise_sweep(points, counter))
-                        else:
-                            if do_on:
+        if self.l1a_delay != QINJ_L1A_SPACING_DEFAULT_DELAY:
+            self.log.warning(
+                f"l1a_delay 0x{self.l1a_delay:03x} differs from 0x{QINJ_L1A_SPACING_DEFAULT_DELAY:03x}, the value used "
+                f"with this FC pattern on the bench (QInj at BX 0x005, L1A at BX 0x1fd); headers may carry no hits"
+            )
+
+        with self._scan_files(f"QInjSCurve_{method}", dict(params)) as record:
+            # the on-chip calibration runs with IDLE fast commands, before charge is injected
+            baselines = {}
+            with self._fc_session("idle"):
+                for row, col in pixels:
+                    self._check_stop()
+                    with self._pixel_session(row, col):
+                        baselines[(row, col)] = self._baseline(row, col, autocal=True)
+            with self._fc_session("qinj_l1a"):
+                for row, col in pixels:
+                    with self._pixel_session(row, col):
+                        bl, nw = baselines[(row, col)]
+                        base_fields = {"disDataReadout": 0, "QInjEn": 1, "disTrigPath": 0, "Bypass_THCal": 1,
+                                       "enable_TDC": 1, "L1Adelay": self.l1a_delay, **OPEN_WINDOWS}
+                        for qsel in qsels:
+                            self.chip.write_pixel(row, col, {**base_fields, "QSel": qsel, "DAC": DAC_MAX})
+                            meta = {"qsel": qsel, "charge_fC": qsel + 1, "baseline": bl, "noise_width": nw}
+                            result: dict[str, Any] = {"row": row, "col": col, "qsel": qsel, "charge_fC": qsel + 1,
+                                                      "baseline": bl, "noise_width": nw, "method": method}
+                            if method == "sweep":
+                                lo = int(params.get("dac_min", bl - 10))
+                                hi = int(params.get("dac_max", bl + 150))
+                                st = int(params.get("step", 2))
                                 dat_path = self._pixel_file(
-                                    f"{self.chip_name}_VRef_SCurve_BinarySearch_TurnOn_Pixel_C{col}_R{row}{tag}"
-                                    + (f"_QInj_{qsel}" if len(qsels) > 1 else ""))
+                                    f"{self.chip_name}_VRef_SCurve_Sweep_Pixel_C{col}_R{row}_QInj_{qsel}{tag}")
                                 record["pixel_files"].append(str(dat_path))
+                                points = []
                                 with open(dat_path, "w") as dat:
-                                    result["turn_on"] = self._bisect_turn_on(
-                                        row, col, max(bl + 3 * nw, 1), record, {**meta, "phase": "turn_on"}, dat)
-                            if do_off:
-                                dat_path = self._pixel_file(
-                                    f"{self.chip_name}_VRef_SCurve_BinarySearch_TurnOff_Pixel_C{col}_R{row}_QInj_{qsel}{tag}")
-                                record["pixel_files"].append(str(dat_path))
-                                with open(dat_path, "w") as dat:
-                                    result["turn_off"] = self._bisect_turn_off(
-                                        row, col, max(bl, 0), turnoff_max, counter, record,
-                                        {**meta, "phase": "turn_off"}, dat)
-                        record["results"].append(result)
+                                    for dac in range(max(lo, 0), min(hi, DAC_MAX) + 1, st):
+                                        w = self._measure(row, col, dac, record, {**meta, "phase": "sweep"}, dat)
+                                        points.append((dac, w.trigbit, w.data, w.header))
+                                result.update(summarise_sweep(points, counter))
+                            else:
+                                if do_on:
+                                    dat_path = self._pixel_file(
+                                        f"{self.chip_name}_VRef_SCurve_BinarySearch_TurnOn_Pixel_C{col}_R{row}{tag}"
+                                        + (f"_QInj_{qsel}" if len(qsels) > 1 else ""))
+                                    record["pixel_files"].append(str(dat_path))
+                                    with open(dat_path, "w") as dat:
+                                        result["turn_on"] = self._bisect_turn_on(
+                                            row, col, max(bl + 3 * nw, 1), record, {**meta, "phase": "turn_on"}, dat)
+                                if do_off:
+                                    dat_path = self._pixel_file(
+                                        f"{self.chip_name}_VRef_SCurve_BinarySearch_TurnOff_Pixel_C{col}_R{row}_QInj_{qsel}{tag}")
+                                    record["pixel_files"].append(str(dat_path))
+                                    with open(dat_path, "w") as dat:
+                                        result["turn_off"] = self._bisect_turn_off(
+                                            row, col, max(bl, 0), turnoff_max, counter, record,
+                                            {**meta, "phase": "turn_off"}, dat)
+                            record["results"].append(result)
         return record
 
     def _bisect_turn_on(self, row, col, upper, record, meta, dat) -> dict[str, Any]:

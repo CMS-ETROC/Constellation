@@ -58,6 +58,7 @@ class FakeChip:
     DEFAULTS = {
         "disDataReadout": 1, "QInjEn": 0, "disTrigPath": 1, "Bypass_THCal": 0, "DAC": 0, "QSel": 0,
         "enable_TDC": 0, "L1Adelay": 0, "CLKEn_THCal": 0, "BufEn_THCal": 0,
+        "RSTn_THCal": 1, "ScanStart_THCal": 0, "TH_offset": 0x0A,
         **{k: 0 for k in OPEN_WINDOWS},
     }
 
@@ -69,17 +70,29 @@ class FakeChip:
         self.set_dac_calls = 0
         self.fail_on_set_dac_call = fail_on_set_dac_call
         self.closed = False
+        self.write_delay = 0.0  # seconds per write_pixel, to model a slow I2C adapter
+        # the board reports whether QInj is in the playing FC pattern (set by FakeKC705)
+        self.fc_qinj_playing = lambda: False
+        self.autocal_fc_qinj: list[bool] = []
 
     def snapshot(self) -> dict[tuple[int, int], dict[str, int]]:
         with self.lock:
             return {p: dict(f) for p, f in self.pixels.items()}
 
+    def _check_open(self):
+        if self.closed:
+            raise ChipWriteError("I2C adapter closed")
+
     def read_pixel(self, row, col):
         with self.lock:
+            self._check_open()
             return {k: self.pixels[(row, col)][k] for k in PIXEL_FIELDS}
 
     def write_pixel(self, row, col, fields):
+        if self.write_delay:
+            time.sleep(self.write_delay)
         with self.lock:
+            self._check_open()
             for k, v in fields.items():
                 if k not in self.pixels[(row, col)]:
                     raise ChipWriteError(f"unknown field {k}")
@@ -88,6 +101,7 @@ class FakeChip:
 
     def set_dac(self, row, col, dac):
         with self.lock:
+            self._check_open()
             self.set_dac_calls += 1
             if self.fail_on_set_dac_call is not None and self.set_dac_calls >= self.fail_on_set_dac_call:
                 raise ChipWriteError("simulated I2C failure")
@@ -96,8 +110,12 @@ class FakeChip:
 
     def auto_calibrate(self, row, col):
         with self.lock:
+            self._check_open()
             # the on-chip calibration leaves its own register changes behind
-            self.pixels[(row, col)].update({"CLKEn_THCal": 1, "BufEn_THCal": 1, "Bypass_THCal": 0})
+            self.pixels[(row, col)].update(
+                {"CLKEn_THCal": 1, "BufEn_THCal": 1, "Bypass_THCal": 0, "RSTn_THCal": 0, "ScanStart_THCal": 1}
+            )
+            self.autocal_fc_qinj.append(self.fc_qinj_playing())
             self.version += 1
             return self.baselines[(row, col)]
 
@@ -156,6 +174,10 @@ class FakeKC705:
         ]
         self._window_key = None
         self._window_counts = None
+        # called with the status address before each status read is answered
+        self.on_status_read = None
+        if chip is not None:
+            chip.fc_qinj_playing = lambda: bool(self.pattern) and FC_QINJ in self.pattern
 
     # --- lifecycle --------------------------------------------------------
     def start(self) -> "FakeKC705":
@@ -269,6 +291,8 @@ class FakeKC705:
                     self.received.append(("read_config", addr, 0))
                     return self.config[addr]
                 self.received.append(("read_status", sub, 0))
+                if self.on_status_read is not None:
+                    self.on_status_read(sub)
                 return self._status_word(sub)
             if 0x20 <= upper < 0x40:
                 addr = upper - 0x20

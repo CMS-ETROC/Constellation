@@ -253,18 +253,20 @@ class CounterReader:
     def read_window(self) -> CounterWindow:
         """Read the last completed window of the selected channel (page 0 is selected first).
 
-        The 11 words are read one by one; if the refresh counter changed while reading,
-        the read is repeated so that all values belong to the same window.
+        The 11 words are read one by one. refresh is read before and after them; the read
+        is accepted only if both match the refresh inside the words, so a latch anywhere
+        during the read is detected and the read repeated.
         """
         with self.link.lock:
             self.select_page(PAGE_COUNTERS)
             reg13 = self.link.read_config(REG13)
             en_l1a = self.en_l1a()
             for _ in range(3):
+                before = self.read_refresh()
                 words = self.link.read_status_words()
-                again = refresh_from_words(self.link.read_status(6), self.link.read_status(7))
+                after = self.read_refresh()
                 fields = decode_page0(words)
-                if again == fields["refresh"]:
+                if before == after == fields["refresh"]:
                     break
             else:
                 raise CounterTimeoutError("refresh counter changed during three consecutive reads")
@@ -282,16 +284,20 @@ class CounterReader:
             status_words=words,
         )
 
-    def wait_windows(self, increments: int = 2, stop_event: threading.Event | None = None) -> CounterWindow:
+    def wait_windows(
+        self, increments: int = 2, stop_event: threading.Event | None = None, start_refresh: int | None = None
+    ) -> CounterWindow:
         """Wait until `increments` windows have completed after now, then read the latest one.
 
         Call this AFTER changing a DAC or the FC pattern: with increments = 2 the first
         window may still be partial, the second one started after the change.
+        `start_refresh` counts from a refresh value read earlier instead of from now
+        (continuous recording without gaps between calls).
         A refresh counter that goes backwards means the counters were reset (link lost
         alignment or clear_fifo); the wait then starts over once.
         """
         self.select_page(PAGE_COUNTERS)
-        start = self.read_refresh()
+        start = self.read_refresh() if start_refresh is None else start_refresh
         deadline = time.monotonic() + (increments + 2) * self.window_s + 1.0
         restarted = False
         while True:
