@@ -103,19 +103,30 @@ class EtrocTransmitter(KC705RegisterCommands, TransmitterSatellite, version=ETRO
         """
         move to data taking position
         """
-        # User tags of the begin-of-run message (the framework adds the configuration)
-        self.bor = {
-            "start_time": time.strftime("%Y-%m-%d-%H%M%S", time.localtime()),
-            "run_identifier": run_identifier,
-            "fast_command_memo": self.fast_command_memo,
-        }
         time.sleep(0.1)  # add sleep to make sure that everything has stopped
+
+        if self.clear_fifo:
+            # Words left in the FIFO after the previous stop_DAQ would open this run. fifo_reset
+            # drives the global reset, which also stops the FC playback: reprogram it afterwards.
+            self.log.info("Clearing FIFO before the run...")
+            cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "clear_fifo")
+            time.sleep(2.1)
+            self.configure_memo_FC()
 
         # FPGA Presteps for DAQ
         if self.reset_counter:
             cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "reset_counter")
             time.sleep(0.1)
-            self.log.info("Cleared Event Counter")
+            self.log.info("Pulsed clrError (pulse register bit 5, 'reset_counter')")
+
+        # User tags of the begin-of-run message (the framework adds the configuration). The
+        # registers are read back from the board, so commands sent in ORBIT are recorded too.
+        self.bor = {
+            "start_time": time.strftime("%Y-%m-%d-%H%M%S", time.localtime()),
+            "run_identifier": run_identifier,
+            "fast_command_memo": self.fast_command_memo,
+            "kc705_readback": self._read_back_registers(),
+        }
 
         # Start DAQ Session on FPGA
         self.log.info("Starting DAQ Session on FPGA...")
@@ -186,6 +197,14 @@ class EtrocTransmitter(KC705RegisterCommands, TransmitterSatellite, version=ETRO
             self.send_data_record(data_record)
 
         return "Finished acquisition"
+
+    def _read_back_registers(self) -> dict[str, str]:
+        """Config registers 4-8 and 13-15 as read from the board, as hex strings."""
+        regs = {}
+        for name, reg in cmd_interpret.CONFIG_REGISTERS.items():
+            if 4 <= reg <= 8 or 13 <= reg <= 15:
+                regs[f"reg{reg}_{name}"] = f"0x{cmd_interpret.read_config_reg(self.connection_socket, reg):04x}"
+        return regs
 
     def _close_connection(self) -> None:
         """Close the KC705 TCP connection if one is open."""
