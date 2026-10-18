@@ -238,9 +238,19 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         if not self._stop_scan(join=True):
             # keep link and chip so the scan thread can still restore the pixel and the FC mode
             raise RuntimeError("Scan thread did not stop; KC705 and I2C left open for its register restore")
-        self._idle_fc_quietly("landing")
-        self._release()
-        return "Landed - fast commands idle, KC705 connection closed"
+        log, link, failed = self.log, self._link, []
+        fc_idle = answered = False
+        if link is not None and link.is_open:
+            fc_idle = run_step(log, "Idling the fast commands (landing)", self._apply_fc_mode, "idle")
+            if not fc_idle:
+                failed.append("FC idle")
+            log.info(f"Reading Reg{FENCE_REGISTER} back to confirm the FC idle (waits up to {link.io_timeout} s)")
+            answered = run_step(log, "Reading back Reg%d after the FC idle (landing)" % FENCE_REGISTER, link.read_config, FENCE_REGISTER)
+        released = run_step(log, "Releasing KC705 and I2C (landing)", self._release)
+        return "Landed - " + shutdown_text(
+            ["fast commands idle"] if fc_idle else [], answered, failed,
+            ["KC705 connection and I2C closed" if released else "releasing KC705 and I2C failed"],
+        )
 
     def do_starting(self, run_identifier: str) -> str:
         if self._busy():
@@ -596,13 +606,6 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         self._fc_mode = mode.strip()
         self._mark_change()
         self.log.info(f"Fast commands set to '{self._fc_mode}' ({memo})")
-
-    def _idle_fc_quietly(self, reason: str) -> None:
-        if self._link is not None and self._link.is_open:
-            try:
-                self._apply_fc_mode("idle")
-            except Exception as e:
-                self.log.warning(f"Could not set FC to idle on {reason}: {e}")
 
     def _mark_change(self) -> None:
         """Remember the refresh value at a channel/FC change; windows count as settled settle_windows later."""
