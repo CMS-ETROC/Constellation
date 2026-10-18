@@ -32,8 +32,39 @@ The satellites are `SatelliteEtrocTransmitter`, `SatelliteEtrocReceiver`,
 (docs/operator_guide/concepts/configuration_files.md). Our older files use
 `[satellites.ETROC2Classic.One]`; those sections reach no satellite, and the
 satellites used to run on their defaults without notice. The satellites now refuse an
-empty configuration (set `allow_default_config = true` to run on defaults on purpose),
-warn about keys they do not use, and log the effective configuration.
+empty configuration, and also a configuration that holds none of the keys every real
+section of the type sets (`satellite_types.REQUIRED_KEYS`): that one came from
+`[_default]` or `[<Type>._default]` alone, because the satellite's own section is
+misspelled or in the old grammar. The error names the section the satellite expected,
+e.g. `no [EtrocTransmitter.One] section reached this satellite`. Set
+`allow_default_config = true` to run on defaults on purpose. The satellites also warn
+about keys they do not use and log the effective configuration.
+
+| Type | Required keys (at least one must reach the satellite; the preflight wants all) |
+|---|---|
+| EtrocTransmitter | `fast_command_memo`, `polarity`, `active_channel`, `timestamp` |
+| EtrocReceiver | `output_path`, `translate`, `skip_fillers` |
+| EtrocWaveform | the EtrocTransmitter keys, `i2c_port`, `chip_addresses`, `ws_addresses`, `chip_names` |
+| EtrocCounters | `output_path`, `channel`, `fc_mode_on_launch` |
+
+The lists come from the 2025 controller files (every section of a type sets these keys;
+`hostname` is left out because the files rely on its default). A `[_default]` that itself
+sets one of them hides a missing section from the satellite; the preflight below still
+reports it.
+
+Check a file before loading it in the controller:
+
+```sh
+python -m constellation.satellites.EtrocCommon.check_toml run.toml
+```
+
+It reports tables in the old `[satellites.*]` grammar, type names that differ from an ETROC
+type only in case or are 0.x names or close misspellings (with the spelling to use), other
+top-level tables that are not `[_default]` or a known satellite type (pass `--allow-type X`
+for a C++ satellite of the group), and for every `[<EtrocType>.<name>]` the configuration
+the satellite receives, merged by the controller's own parser (`[_default]` <
+`[<Type>._default]` < `[<Type>.<name>]`), with the required keys missing from it. Exit
+status 0 when clean, 1 with problems, 2 when the file cannot be read.
 
 Convert an old file:
 

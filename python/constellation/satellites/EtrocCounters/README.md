@@ -216,8 +216,11 @@ cache is older than three windows.
 | `l1a_delay` | `0x1F5` | pixel L1Adelay for QInj scans (the 2023-24 value 501) |
 | `firmware_window_s` | `1.0` | wait timing only (tests use a shorter simulated window); programs nothing |
 
-An empty configuration is refused: the TOML section must be `[EtrocCounters.<name>]`
-(Constellation 1.x), see `example_counters.toml`.
+An empty configuration is refused, and so is one that holds none of `output_path`,
+`channel` and `fc_mode_on_launch` (it came from `[_default]` alone): the TOML section must
+be `[EtrocCounters.<name>]` (Constellation 1.x), see `example_counters.toml`, and the
+error names the expected section. `python -m constellation.satellites.EtrocCommon.check_toml
+file.toml` checks a file before it is loaded (see `EtrocCommon/README.md`).
 
 ## First test on hardware (checklist)
 

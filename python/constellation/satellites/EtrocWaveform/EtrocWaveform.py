@@ -13,6 +13,7 @@ from constellation.core.satellite import Satellite
 from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
 from ..EtrocCommon.commands import KC705RegisterCommands
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 
 _WAVEFORM_MEMO_WORDS = {"QInj", "L1A", "L1ARange", "BCR", "Triggerbit", "Start", "uniform"}
 _REPEATED_RE = re.compile(r"^repeatedQInj(=\d+)?$")
@@ -20,6 +21,8 @@ _REPEATED_RE = re.compile(r"^repeatedQInj(=\d+)?$")
 
 class EtrocWaveform(KC705RegisterCommands, Satellite, version=ETROC_SATELLITES_VERSION):
     """Waveform-sampler readout: configures the ETROC2 over I2C and saves one CSV per trigger."""
+
+    REQUIRED_KEYS = REQUIRED_KEYS["EtrocWaveform"]
 
     DEFAULT_CONFIG = {
         "hostname": "192.168.2.3",

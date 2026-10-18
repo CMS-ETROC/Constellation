@@ -20,10 +20,13 @@ from constellation.core.receiver_satellite import ReceiverSatellite
 
 from ..EtrocCommon import ETROC_SATELLITES_VERSION
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 
 
 class EtrocReceiver(ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
     """Writes the KC705 data stream to .nem (translated) or .bin files, one directory per run."""
+
+    REQUIRED_KEYS = REQUIRED_KEYS["EtrocReceiver"]
 
     # 1. Centralize standard configurations
     DEFAULT_CONFIG = {

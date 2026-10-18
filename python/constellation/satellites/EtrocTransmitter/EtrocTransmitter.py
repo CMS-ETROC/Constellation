@@ -12,10 +12,13 @@ from constellation.core.transmitter_satellite import TransmitterSatellite
 from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
 from ..EtrocCommon.commands import KC705RegisterCommands
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 
 
 class EtrocTransmitter(KC705RegisterCommands, TransmitterSatellite, version=ETROC_SATELLITES_VERSION):
     """Reads the KC705 data FIFO over TCP and sends it as CDTP data records."""
+
+    REQUIRED_KEYS = REQUIRED_KEYS["EtrocTransmitter"]
 
     DEFAULT_CONFIG = {
         "hostname": "192.168.2.3",

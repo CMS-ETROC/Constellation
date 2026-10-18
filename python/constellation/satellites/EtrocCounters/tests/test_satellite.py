@@ -251,6 +251,14 @@ def test_empty_configuration_is_refused(setup):
     assert "[EtrocCounters.<name>]" in sat.fsm.status
 
 
+
+def test_configuration_from_default_alone_is_refused(setup):
+    sat, tx, fake, _, _ = setup
+    call(tx, "initialize", {"hostname": "127.0.0.1", "port": fake.port})
+    wait_state(sat, SatelliteState.ERROR)
+    assert "no [EtrocCounters.Test] section reached this satellite" in sat.fsm.status
+
+
 @pytest.mark.parametrize(
     "override",
     [

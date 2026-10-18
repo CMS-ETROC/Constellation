@@ -16,12 +16,10 @@ Usage:
 import re
 import sys
 
-TYPE_MAP = {
-    "etroc2classic": "EtrocTransmitter",
-    "etroc2receiver": "EtrocReceiver",
-    "etroc2waveform": "EtrocWaveform",
-    "etroc2counters": "EtrocCounters",
-}
+from .satellite_types import OLD_TYPE_NAMES
+
+# lower-case 0.x type -> 1.x type
+TYPE_MAP = {old.lower(): new for new, old in OLD_TYPE_NAMES.items()}
 
 _HEADER = re.compile(r"^\s*\[\s*satellites\.([A-Za-z0-9_]+)(?:\.([A-Za-z0-9_]+))?\s*\]\s*(#.*)?$")
 

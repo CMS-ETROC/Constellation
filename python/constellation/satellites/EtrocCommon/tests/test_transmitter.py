@@ -53,7 +53,7 @@ def setup(monkeypatch):
     sock.setsockopt(zmq.RCVTIMEO, 5000)
     sock.connect(f"tcp://127.0.0.1:{sat.cmd_port}")
     tx = CommandTransmitter("test", sock)
-    config = {"hostname": "127.0.0.1", "port": fake.port, "socket_timeout": 5.0, "fc_delays": 0x0123}
+    config = {"hostname": "127.0.0.1", "port": fake.port, "socket_timeout": 5.0, "fc_delays": 0x0123, "polarity": 0x4023}
     assert call(tx, "initialize", config).verb_type == OK
     wait_state(sat, SatelliteState.INIT)
     assert call(tx, "launch").verb_type == OK

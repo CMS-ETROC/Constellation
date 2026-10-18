@@ -29,6 +29,7 @@ from constellation.core.satellite import Satellite
 
 from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 from .chipio import POWER_MODES
 from .counters import (
     FC_MODES,
@@ -74,6 +75,8 @@ def _scan_params(params: dict | str) -> dict:
 
 class EtrocCounters(Satellite, version=ETROC_SATELLITES_VERSION):
     """KC705 counter readout (data, header, trigger-bit, coincidence per 1 s window) and threshold scans."""
+
+    REQUIRED_KEYS = REQUIRED_KEYS["EtrocCounters"]
 
     DEFAULT_CONFIG = {
         "hostname": "192.168.2.3",
