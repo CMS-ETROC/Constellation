@@ -2,9 +2,10 @@
 SPDX-FileCopyrightText: 2025 DESY and the Constellation authors
 SPDX-License-Identifier: EUPL-1.2
 
-EtrocTransmitter reconfigure over loopback CSCP against the simulated KC705.
+EtrocTransmitter reconfigure and Ctrl-C reentry, over loopback CSCP against the simulated KC705.
 """
 
+import logging
 import threading
 import time
 import types
@@ -23,6 +24,7 @@ from .. import EtrocTransmitter as tx_module
 from ..EtrocTransmitter import EtrocTransmitter
 
 OK = CSCP1Message.Type.SUCCESS
+STOP_DAQ_BIT = 0x0400
 
 
 def wait_state(sat, state, timeout=10.0):
@@ -38,9 +40,33 @@ def call(tx, cmd, payload=None):
     return tx.get_message()
 
 
+def ctrl_c(sat, thread, timeout=20.0):
+    """Raise KeyboardInterrupt in the satellite main loop, as Ctrl-C does, and wait for run_satellite to return."""
+    get = sat.task_queue.get
+
+    def interrupted(*args, **kwargs):
+        sat.task_queue.get = get
+        raise KeyboardInterrupt
+
+    sat.task_queue.get = interrupted
+    thread.join(timeout)
+    assert not thread.is_alive(), "run_satellite did not return after KeyboardInterrupt"
+
+
+def assert_run_thread_gone(sat):
+    assert sat._state_thread_fut is not None and sat._state_thread_fut.done()
+    for worker in list(sat._state_thread_exc._threads):
+        worker.join(2.0)
+        assert not worker.is_alive()
+
+
 def qinj_playing(fake):
     with fake.lock:
         return bool(fake.pattern) and FC_QINJ in fake.pattern
+
+
+def failed_steps(caplog):
+    return [r.getMessage() for r in caplog.records if "failed" in r.getMessage()]
 
 
 @pytest.fixture
@@ -146,3 +172,48 @@ def test_reconfigure_outside_orbit_is_refused(setup):
     assert rep.verb_type != OK
     assert "not allowed in INIT" in rep.verb_msg
     assert sat.fsm.state == SatelliteState.INIT
+
+
+def test_ctrl_c_in_run_stops_the_daq_idles_fc_and_releases_everything(setup, caplog):
+    sat, tx, fake, thread = setup
+    assert call(tx, "start", "run1").verb_type == OK
+    wait_state(sat, SatelliteState.RUN)
+    deadline = time.monotonic() + 5
+    while fake.fifo_reads < 3:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert fake.daq_running and qinj_playing(fake)
+    stops = fake.pulses(STOP_DAQ_BIT)
+
+    ctrl_c(sat, thread)
+
+    assert fake.pulses(STOP_DAQ_BIT) == stops + 1
+    assert not fake.daq_running
+    assert not qinj_playing(fake)
+    assert sat.connection_socket is None
+    assert_run_thread_gone(sat)
+    assert not sat._dtm._push_thread.is_alive()
+    reads = fake.fifo_reads
+    time.sleep(0.2)
+    assert fake.fifo_reads == reads
+
+    caplog.clear()
+    with fake.lock:
+        mark = len(fake.received)
+    sat.reentry()
+    with fake.lock:
+        assert fake.received[mark:] == []
+    assert failed_steps(caplog) == []
+
+
+def test_reentry_after_landing_touches_nothing(setup, caplog):
+    sat, tx, fake, _ = setup
+    call(tx, "land")
+    wait_state(sat, SatelliteState.INIT)
+    caplog.clear()
+    with fake.lock:
+        mark = len(fake.received)
+    sat.reentry()
+    with fake.lock:
+        assert fake.received[mark:] == []
+    assert failed_steps(caplog) == []

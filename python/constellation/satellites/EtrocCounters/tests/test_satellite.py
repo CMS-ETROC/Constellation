@@ -62,10 +62,10 @@ def setup(tmp_path, monkeypatch):
         "kc705_registers": {"triggerbit_delay": 0x1800},
     }
     yield sat, tx, fake, chip, config
-    if sat.fsm.state == SatelliteState.RUN:
+    if thread.is_alive() and sat.fsm.state == SatelliteState.RUN:
         call(tx, "stop")
         wait_state(sat, SatelliteState.ORBIT)
-    if sat.fsm.state == SatelliteState.ORBIT:
+    if thread.is_alive() and sat.fsm.state == SatelliteState.ORBIT:
         call(tx, "land")
         wait_state(sat, SatelliteState.INIT)
     sat.reentry()
@@ -251,15 +251,6 @@ def test_empty_configuration_is_refused(setup):
     assert "[EtrocCounters.<name>]" in sat.fsm.status
 
 
-
-def test_configuration_from_default_alone_is_refused(setup):
-    sat, tx, fake, _, _ = setup
-    call(tx, "initialize", {"hostname": "127.0.0.1", "port": fake.port})
-    wait_state(sat, SatelliteState.ERROR)
-    assert "no [EtrocCounters.Test] section reached this satellite" in sat.fsm.status
-
-
-
 def test_configuration_from_default_alone_is_refused(setup):
     sat, tx, fake, _, _ = setup
     call(tx, "initialize", {"hostname": "127.0.0.1", "port": fake.port})
@@ -308,6 +299,19 @@ def test_unreachable_board_fails_launch_with_hint(setup):
     assert "ONE TCP client" in sat.fsm.status
 
 
+def ctrl_c(sat, thread, timeout=20.0):
+    """Raise KeyboardInterrupt in the satellite main loop, as Ctrl-C does, and wait for run_satellite to return."""
+    get = sat.task_queue.get
+
+    def interrupted(*args, **kwargs):
+        sat.task_queue.get = get
+        raise KeyboardInterrupt
+
+    sat.task_queue.get = interrupted
+    thread.join(timeout)
+    assert not thread.is_alive(), "run_satellite did not return after KeyboardInterrupt"
+
+
 def test_reconfigure_writes_registers_and_switches_channel(setup):
     sat, tx, fake, _, config = setup
     launch(sat, tx, config)
@@ -329,7 +333,6 @@ def test_reconfigure_writes_registers_and_switches_channel(setup):
     assert call(tx, "read_counters").payload["channel"] == 2
 
 
-
 @pytest.mark.parametrize(
     "change, word",
     [
@@ -347,3 +350,29 @@ def test_refused_reconfigure_stays_in_orbit(setup, change, word):
     time.sleep(0.2)
     assert sat.fsm.state == SatelliteState.ORBIT
 
+
+def test_ctrl_c_in_run_closes_the_run_and_releases_the_board(setup, tmp_path, caplog):
+    sat, tx, fake, chip, config = setup
+    thread = next(t for t in threading.enumerate() if getattr(t, "_target", None) == sat.run_satellite)
+    launch(sat, tx, config)
+    assert call(tx, "set_fc_mode", ["qinj_l1a"]).verb_type == OK
+    assert call(tx, "start", "run_ctrl_c").verb_type == OK
+    wait_state(sat, SatelliteState.RUN)
+    time.sleep(5 * WINDOW)
+    assert not no_qinj_playing(fake)
+
+    ctrl_c(sat, thread)
+
+    info = json.loads((tmp_path / "run_ctrl_c" / "run.json").read_text())
+    assert info["ended_by"] == "reentry"
+    assert sat._run_files == {}
+    assert no_qinj_playing(fake)
+    assert sat._link is None and sat._poller is None and chip.closed
+    assert sat._state_thread_fut.done()
+    for worker in list(sat._state_thread_exc._threads):
+        worker.join(2.0)
+        assert not worker.is_alive()
+
+    caplog.clear()
+    sat.reentry()
+    assert [r.getMessage() for r in caplog.records if "failed" in r.getMessage()] == []

@@ -23,6 +23,7 @@ GAIN_DAC_PER_FC = 6
 NOISE_PEAK = 1_000_000
 
 FC_IDLE, FC_QINJ, FC_L1A = 0x0, 0x5, 0x6
+FIFO_FILLER = 0x556  # 12-bit FIFO filler pattern (EtrocReceiver.FIXED_PATTERNS)
 
 
 def concat(fields: list[tuple[int, int]]) -> int:
@@ -158,6 +159,9 @@ class FakeKC705:
         self.pattern: list[int] | None = None
         self.fc_version = 0
         self.received: list[tuple[str, int, int]] = []
+        # DAQ toggled by the start_DAQ / stop_DAQ pulses; data-FIFO reads answer FIFO fillers
+        self.daq_running = False
+        self.fifo_reads = 0
         self.refresh = [0, 0, 0, 0]
         self.latched = [dict(data=0, header=0, trig=0, combine=0) for _ in range(4)]
         self.lock = threading.RLock()
@@ -278,7 +282,9 @@ class FakeKC705:
                         (word,) = struct.unpack(">I", buf[:4])
                         buf = buf[4:]
                         reply = self._handle(word)
-                        if reply is not None:
+                        if isinstance(reply, list):
+                            conn.sendall(struct.pack(f">{len(reply)}I", *reply))
+                        elif reply is not None:
                             conn.sendall(struct.pack(">I", reply))
 
     def _handle(self, word: int) -> int | None:
@@ -303,6 +309,9 @@ class FakeKC705:
                 self.received.append(("pulse", 0, low))
                 self._pulse(low)
                 return None
+            if upper == 0x19:  # read_data_fifo: Cnt = low + 1 words
+                self.fifo_reads += 1
+                return [(FIFO_FILLER << 20) | (i & 0xFFFFF) for i in range(low + 1)]
             self.received.append(("other", upper, low))
             return None
 
@@ -318,6 +327,10 @@ class FakeKC705:
         if bits & 0x0004:  # fc_signal_start: play memory[0 .. Reg11]
             self.pattern = list(self.memory[: self.config[11] + 1])
             self.fc_version += 1
+        if bits & 0x0200:  # start_DAQ
+            self.daq_running = True
+        if bits & 0x0400:  # stop_DAQ
+            self.daq_running = False
 
     # --- inspection -------------------------------------------------------
     def writes_to(self, reg: int) -> list[int]:

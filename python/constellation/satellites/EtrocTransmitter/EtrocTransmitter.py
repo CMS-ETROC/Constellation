@@ -12,11 +12,17 @@ from constellation.core.transmitter_satellite import TransmitterSatellite
 from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
 from ..EtrocCommon.commands import KC705RegisterCommands
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.lifecycle import EtrocLifecycle, run_step
 from ..EtrocCommon.reconfigure import EtrocReconfigure
 from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 
+# I/O timeout for the stop/idle writes of a shutdown, so a dead board cannot hold it for socket_timeout
+QUIESCE_IO_TIMEOUT_S = 2.0
 
-class EtrocTransmitter(KC705RegisterCommands, EtrocReconfigure, TransmitterSatellite, version=ETROC_SATELLITES_VERSION):
+
+class EtrocTransmitter(
+    KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, TransmitterSatellite, version=ETROC_SATELLITES_VERSION
+):
     """Reads the KC705 data FIFO over TCP and sends it as CDTP data records."""
 
     REQUIRED_KEYS = REQUIRED_KEYS["EtrocTransmitter"]
@@ -59,6 +65,7 @@ class EtrocTransmitter(KC705RegisterCommands, EtrocReconfigure, TransmitterSatel
         """Configure the Satellite and any associated hardware."""
 
         self._close_connection()
+        self._daq_started = False
         effective = load_typed_config(self, config, self.DEFAULT_CONFIG)
         # Reject a bad prescale factor or a malformed memo before any hardware access
         self._validate_settings(effective)
@@ -130,6 +137,7 @@ class EtrocTransmitter(KC705RegisterCommands, EtrocReconfigure, TransmitterSatel
 
         self.log.debug(f"Status of DAQ Toggle before Start Pulse: {format(cmd_interpret.read_status_reg(self.connection_socket, 5), '016b')}")
         cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "start_DAQ")
+        self._daq_started = True
         time.sleep(0.1)
         self.log.debug(f"Status of DAQ Toggle after Start Pulse: {format(cmd_interpret.read_status_reg(self.connection_socket, 5), '016b')}")
 
@@ -140,16 +148,7 @@ class EtrocTransmitter(KC705RegisterCommands, EtrocReconfigure, TransmitterSatel
         time.sleep(0.1)
         # Stop DAQ Session on FPGA
         self.log.info("Stopping DAQ on FPGA...")
-
-        # Bitwise logic: Clear the bottom 2 bits (~0b11) and set them to '10' (0b10)
-        self.timestamp = (self.timestamp & ~0b11) | 0b10
-        cmd_interpret.write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
-        time.sleep(0.1)
-
-        self.log.debug(f"Status of DAQ Toggle before Stop Pulse: {format(cmd_interpret.read_status_reg(self.connection_socket, 5), '016b')}")
-        cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "stop_DAQ")
-        time.sleep(0.1)
-        self.log.debug(f"Status of DAQ Toggle after Stop Pulse: {format(cmd_interpret.read_status_reg(self.connection_socket, 5), '016b')}")
+        self._stop_daq()
 
         # User tags of the end-of-run message
         self.eor = {
@@ -198,6 +197,19 @@ class EtrocTransmitter(KC705RegisterCommands, EtrocReconfigure, TransmitterSatel
                 regs[f"reg{reg}_{name}"] = f"0x{cmd_interpret.read_config_reg(self.connection_socket, reg):04x}"
         return regs
 
+    def _stop_daq(self) -> None:
+        """The stop sequence of do_stopping: timestamp register, then the stop_DAQ pulse."""
+        # Bitwise logic: Clear the bottom 2 bits (~0b11) and set them to '10' (0b10)
+        self.timestamp = (self.timestamp & ~0b11) | 0b10
+        cmd_interpret.write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
+        time.sleep(0.1)
+
+        self.log.debug(f"Status of DAQ Toggle before Stop Pulse: {format(cmd_interpret.read_status_reg(self.connection_socket, 5), '016b')}")
+        cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "stop_DAQ")
+        self._daq_started = False
+        time.sleep(0.1)
+        self.log.debug(f"Status of DAQ Toggle after Stop Pulse: {format(cmd_interpret.read_status_reg(self.connection_socket, 5), '016b')}")
+
     def _close_connection(self) -> None:
         """Close the KC705 TCP connection if one is open."""
         cmd_interpret.close_socket(getattr(self, "connection_socket", None))
@@ -210,7 +222,32 @@ class EtrocTransmitter(KC705RegisterCommands, EtrocReconfigure, TransmitterSatel
     def _apply_reconfigure(self, plan: dict[str, Any]) -> list[str]:
         return self._reconfigure_kc705(plan)
 
+    # ------------------------------------------------------- ERROR and Ctrl-C
+    def _quiesce(self, reason: str) -> str:
+        """Stop the DAQ if a run started it, idle the fast commands, close the socket (idempotent)."""
+        sock = getattr(self, "connection_socket", None)
+        if sock is None:
+            return "KC705 connection already closed"
+        run_step(self.log, f"Shortening the KC705 I/O timeout ({reason})", sock.settimeout, QUIESCE_IO_TIMEOUT_S)
+        if getattr(self, "_daq_started", False):
+            if run_step(self.log, f"Stopping the DAQ ({reason})", self._stop_daq):
+                self.log.info(f"DAQ stopped on {reason}")
+        if run_step(self.log, f"Idling the fast commands ({reason})", self.configure_memo_FC, "Triggerbit"):
+            self.log.info(f"Fast commands idle on {reason}")
+        run_step(self.log, f"Closing the KC705 connection ({reason})", self._close_connection)
+        return "DAQ stopped, fast commands idle, KC705 connection closed"
+
+    def _stop_transport_for_reentry(self) -> None:
+        """Stop the CDTP push thread (non-daemon) without waiting for the queue to drain; no EOR is sent."""
+        dtm = getattr(self, "_dtm", None)
+        thread = getattr(dtm, "_push_thread", None)
+        if thread is None or not thread.is_alive():
+            return
+        dtm._stopevt.set()
+        thread.join(timeout=self.REENTRY_JOIN_TIMEOUT_S)
+        if thread.is_alive():
+            self.log.error("CDTP push thread still sending after reentry; it ends at its data_timeout")
+
     def fail_gracefully(self) -> str:
-        """Release the KC705 connection when entering ERROR so a later initialize can reconnect."""
-        self._close_connection()
-        return "Failed gracefully, KC705 connection closed"
+        """Entering ERROR: stop the DAQ, idle the fast commands and release the connection for a later initialize."""
+        return "Failed gracefully: " + self._quiesce_locked("failure")

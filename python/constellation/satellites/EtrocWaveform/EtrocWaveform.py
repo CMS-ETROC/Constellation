@@ -14,6 +14,7 @@ from constellation.core.satellite import Satellite
 from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
 from ..EtrocCommon.commands import KC705RegisterCommands
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.lifecycle import EtrocLifecycle, run_step
 from ..EtrocCommon.reconfigure import EtrocReconfigure
 from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 
@@ -21,10 +22,16 @@ _WAVEFORM_MEMO_WORDS = {"QInj", "L1A", "L1ARange", "BCR", "Triggerbit", "Start",
 _REPEATED_RE = re.compile(r"^repeatedQInj(=\d+)?$")
 
 
-class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, Satellite, version=ETROC_SATELLITES_VERSION):
+# I/O timeout for the stop/idle writes of a shutdown, so a dead board cannot hold it for socket_timeout
+QUIESCE_IO_TIMEOUT_S = 2.0
+
+
+class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_SATELLITES_VERSION):
     """Waveform-sampler readout: configures the ETROC2 over I2C and saves one CSV per trigger."""
 
     REQUIRED_KEYS = REQUIRED_KEYS["EtrocWaveform"]
+    # do_run polls the WS-ready bit for up to 5 s before it checks stop_requested() again
+    REENTRY_JOIN_TIMEOUT_S = 8.0
 
     DEFAULT_CONFIG = {
         "hostname": "192.168.2.3",
@@ -150,6 +157,7 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, Satellite, version=
 
         self._close_connection()
         self._close_i2c()
+        self._ws_run_active = False
         effective = load_typed_config(self, config, self.DEFAULT_CONFIG)
         self._validate_settings(effective)
 
@@ -219,6 +227,7 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, Satellite, version=
         cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "ws_clear_pulse")
         cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "clear_ws_block")
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "active_channel", self.ws_active_channel)
+        self._ws_run_active = True
         time.sleep(0.1)
 
         return f"Run {run_identifier} Session Started"
@@ -227,6 +236,7 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, Satellite, version=
         """End the run. Add run metadata for end-of-run event"""
         time.sleep(0.1)
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "active_channel", self.active_channel)
+        self._ws_run_active = False
         time.sleep(0.1)
         return f"Run {self.run_identifier} Stopped"
 
@@ -299,8 +309,19 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, Satellite, version=
     def _apply_reconfigure(self, plan: dict[str, Any]) -> list[str]:
         return self._reconfigure_kc705(plan)
 
+    # ------------------------------------------------------- ERROR and Ctrl-C
+    def _quiesce(self, reason: str) -> str:
+        """Restore Reg15 if a run set the WS channel, idle the fast commands, close socket and I2C (idempotent)."""
+        sock = getattr(self, "connection_socket", None)
+        if sock is not None:
+            run_step(self.log, f"Shortening the KC705 I/O timeout ({reason})", sock.settimeout, QUIESCE_IO_TIMEOUT_S)
+            if getattr(self, "_ws_run_active", False):
+                run_step(self.log, f"Restoring active_channel after the run ({reason})", self.do_stopping)
+            run_step(self.log, f"Idling the fast commands ({reason})", self.configure_memo_FC, "Triggerbit")
+            run_step(self.log, f"Closing the KC705 connection ({reason})", self._close_connection)
+        run_step(self.log, f"Releasing the I2C adapter ({reason})", self._close_i2c)
+        return "fast commands idle, KC705 connection and I2C adapter closed"
+
     def fail_gracefully(self) -> str:
-        """Release the KC705 connection and the I2C adapter so a later initialize can reconnect."""
-        self._close_connection()
-        self._close_i2c()
-        return "Failed gracefully, KC705 connection and I2C adapter closed"
+        """Entering ERROR: idle the fast commands, release the KC705 connection and the I2C adapter."""
+        return "Failed gracefully: " + self._quiesce_locked("failure")

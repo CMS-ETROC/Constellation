@@ -29,6 +29,7 @@ from constellation.core.satellite import Satellite
 
 from ..EtrocCommon import ETROC_SATELLITES_VERSION, cmd_interpret, fast_command
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.lifecycle import EtrocLifecycle, run_step
 from ..EtrocCommon.reconfigure import EtrocReconfigure
 from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 from .chipio import POWER_MODES
@@ -74,7 +75,7 @@ def _scan_params(params: dict | str) -> dict:
     return params
 
 
-class EtrocCounters(EtrocReconfigure, Satellite, version=ETROC_SATELLITES_VERSION):
+class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_SATELLITES_VERSION):
     """KC705 counter readout (data, header, trigger-bit, coincidence per 1 s window) and threshold scans."""
 
     REQUIRED_KEYS = REQUIRED_KEYS["EtrocCounters"]
@@ -308,17 +309,29 @@ class EtrocCounters(EtrocReconfigure, Satellite, version=ETROC_SATELLITES_VERSIO
         return f"Run stopped after {n} windows"
 
     def fail_gracefully(self) -> str:
-        stopped = self._stop_scan(join=True)
+        return self._quiesce_locked("failure")
+
+    def _quiesce(self, reason: str) -> str:
+        """Stop a scan, end the run files, idle the fast commands, release KC705 and I2C (idempotent)."""
+        try:
+            stopped = self._stop_scan(join=True)
+        except Exception as e:
+            self.log.warning(f"Stopping the scan ({reason}) failed: {type(e).__name__}: {e}")
+            stopped = not self._busy()
+        run_step(self.log, f"Closing the run files ({reason})", self._end_run_files, reason)
+        if not stopped:
+            return "Failed; scan thread still running, KC705 and I2C left open for its register restore"
+        run_step(self.log, f"Idling the fast commands ({reason})", self._idle_fc_quietly, reason)
+        run_step(self.log, f"Releasing KC705 and I2C ({reason})", self._release)
+        return "Failed gracefully, fast commands idle, KC705 connection closed"
+
+    def _end_run_files(self, reason: str) -> None:
+        """Close the run files of a run that did not end with stop; run.json records why."""
         if self._run_info:
-            self._run_info.update(stop_time=time.strftime("%Y-%m-%dT%H:%M:%S"), ended_by="failure")
+            self._run_info.update(stop_time=time.strftime("%Y-%m-%dT%H:%M:%S"), ended_by=reason)
             self._write_run_json()
         self._close_run_files()
         self._run_info = {}
-        if not stopped:
-            return "Failed; scan thread still running, KC705 and I2C left open for its register restore"
-        self._idle_fc_quietly("failure")
-        self._release()
-        return "Failed gracefully, fast commands idle, KC705 connection closed"
 
     # ------------------------------------------------------------ reconfigure
     def _check_reconfigure_allowed(self) -> None:

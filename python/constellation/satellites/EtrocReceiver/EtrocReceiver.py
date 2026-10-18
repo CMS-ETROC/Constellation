@@ -20,11 +20,12 @@ from constellation.core.receiver_satellite import ReceiverSatellite
 
 from ..EtrocCommon import ETROC_SATELLITES_VERSION
 from ..EtrocCommon.config import load_typed_config
+from ..EtrocCommon.lifecycle import EtrocLifecycle, run_step
 from ..EtrocCommon.reconfigure import EtrocReconfigure
 from ..EtrocCommon.satellite_types import REQUIRED_KEYS
 
 
-class EtrocReceiver(EtrocReconfigure, ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
+class EtrocReceiver(EtrocReconfigure, EtrocLifecycle, ReceiverSatellite, version=ETROC_SATELLITES_VERSION):
     """Writes the KC705 data stream to .nem (translated) or .bin files, one directory per run."""
 
     REQUIRED_KEYS = REQUIRED_KEYS["EtrocReceiver"]
@@ -485,7 +486,20 @@ class EtrocReceiver(EtrocReconfigure, ReceiverSatellite, version=ETROC_SATELLITE
             self._set_file_size_limit()
         return [f"{key} = {value!r}" for key, value in plan.items()]
 
+    # ------------------------------------------------------- ERROR and Ctrl-C
+    def _quiesce(self, reason: str) -> str:
+        """Flush and close an open data file (marker RUN_NOT_STOPPED_CLEANLY.txt); idempotent."""
+        if getattr(self, "outfile", None) is None:
+            return "no data file open"
+        run_step(self.log, f"Closing the data file ({reason})", self._close_output, reason)
+        return "data file closed"
+
+    def _stop_transport_for_reentry(self) -> None:
+        """Stop the CDTP pull thread (non-daemon) so no record is written into a closed file."""
+        drc = getattr(self, "_drc", None)
+        if drc is not None and drc.running:
+            drc._stop_pull_thread()
+
     def fail_gracefully(self) -> str:
         """Close the data file on entering ERROR so the data written so far is complete on disk."""
-        self._close_output("failure")
-        return "Failed gracefully, data file closed"
+        return "Failed gracefully, " + self._quiesce_locked("failure")

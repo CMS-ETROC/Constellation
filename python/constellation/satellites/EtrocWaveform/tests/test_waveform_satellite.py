@@ -2,7 +2,7 @@
 SPDX-FileCopyrightText: 2025 DESY and the Constellation authors
 SPDX-License-Identifier: EUPL-1.2
 
-EtrocWaveform reconfigure over loopback CSCP, against the simulated KC705
+EtrocWaveform reconfigure and Ctrl-C reentry over loopback CSCP, against the simulated KC705
 and a stand-in for the i2c_gui2 connection (no USB-ISS).
 """
 
@@ -18,7 +18,7 @@ from constellation.core.network import get_loopback_interface_name
 from constellation.core.protocol.cscp1 import SatelliteState
 
 from ...EtrocCommon import new_wrapper_i2cGui2
-from ...EtrocCounters.tests.fakes import FakeKC705
+from ...EtrocCounters.tests.fakes import FC_QINJ, FakeKC705
 from ..EtrocWaveform import EtrocWaveform
 
 OK = CSCP1Message.Type.SUCCESS
@@ -52,6 +52,24 @@ def wait_state(sat, state, timeout=10.0):
 def call(tx, cmd, payload=None):
     tx.send_request(cmd, payload)
     return tx.get_message()
+
+
+def ctrl_c(sat, thread, timeout=20.0):
+    """Raise KeyboardInterrupt in the satellite main loop, as Ctrl-C does, and wait for run_satellite to return."""
+    get = sat.task_queue.get
+
+    def interrupted(*args, **kwargs):
+        sat.task_queue.get = get
+        raise KeyboardInterrupt
+
+    sat.task_queue.get = interrupted
+    thread.join(timeout)
+    assert not thread.is_alive(), "run_satellite did not return after KeyboardInterrupt"
+
+
+def qinj_playing(fake):
+    with fake.lock:
+        return bool(fake.pattern) and FC_QINJ in fake.pattern
 
 
 @pytest.fixture
@@ -116,3 +134,31 @@ def test_reconfigure_writes_the_register_and_keeps_the_chip(setup):
     assert rep.verb_type != OK and "'i2c_port'" in rep.verb_msg
     time.sleep(0.2)
     assert sat.fsm.state == SatelliteState.ORBIT
+
+
+def test_ctrl_c_in_run_restores_registers_and_releases_i2c(setup, caplog):
+    sat, tx, fake, thread, connections = setup
+    assert call(tx, "start", "run_ctrl_c").verb_type == OK
+    wait_state(sat, SatelliteState.RUN)
+    time.sleep(0.3)
+    with fake.lock:
+        assert fake.config[15] == WS_ACTIVE_CHANNEL
+    assert qinj_playing(fake)
+
+    ctrl_c(sat, thread)
+
+    # do_run returned on stop_requested(), it did not die on the released socket
+    assert sat.fsm.state != SatelliteState.ERROR
+    with fake.lock:
+        assert fake.config[15] == ACTIVE_CHANNEL
+    assert not qinj_playing(fake)
+    assert sat.connection_socket is None
+    assert sat.i2c_conn is None and connections[0].closed
+    assert sat._state_thread_fut.done()
+    for worker in list(sat._state_thread_exc._threads):
+        worker.join(2.0)
+        assert not worker.is_alive()
+
+    caplog.clear()
+    sat.reentry()
+    assert [r.getMessage() for r in caplog.records if "failed" in r.getMessage()] == []

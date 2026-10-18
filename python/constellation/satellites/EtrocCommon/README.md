@@ -143,3 +143,14 @@ and comments.
   | EtrocReceiver | `translate`, `skip_fillers`, `keep_time`, `flush_interval` (takes effect at the next start) |
   | EtrocCounters | `channel`, `fc_mode_on_launch`, `prescale_factor`, `check_layout`, `settle_windows`, `l1a_delay`, the `kc705_registers` section (keys present at initialize); refused while a scan runs |
 
+- Ctrl-C stops the satellite in order. Before, the run thread kept running and the process
+  hung at exit with the KC705 DAQ still started (a second Ctrl-C left it running). Now
+  reentry stops the run thread (bounded wait), stops the CDTP thread without an EOR, and
+  releases the hardware: EtrocTransmitter stops the DAQ, sets the FC to idle and closes
+  the socket; EtrocWaveform also restores Reg15 and releases the USB-ISS; EtrocCounters
+  ends the run files (`run.json` `ended_by = "reentry"`) and releases the board;
+  EtrocReceiver closes the data file and writes the not-stopped-cleanly marker. Each step
+  logs its own failure and the next one still runs; a second reentry does nothing.
+- `fail_gracefully()` (entering ERROR) runs the same release. For EtrocTransmitter and
+  EtrocWaveform this is new: ERROR during a run now also stops the DAQ and idles the FC,
+  not only closes the socket.
