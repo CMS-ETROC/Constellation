@@ -40,7 +40,7 @@ e.g. `no [EtrocTransmitter.One] section reached this satellite`. Set
 `allow_default_config = true` to run on defaults on purpose. The satellites also warn
 about keys they do not use and log the effective configuration.
 
-| Type | Required keys (at least one must reach the satellite; the preflight wants all) |
+| Type | Required keys (at least one must reach the satellite, or it refuses to initialize) |
 |---|---|
 | EtrocTransmitter | `fast_command_memo`, `polarity`, `active_channel`, `timestamp` |
 | EtrocReceiver | `output_path`, `translate`, `skip_fillers` |
@@ -48,14 +48,16 @@ about keys they do not use and log the effective configuration.
 | EtrocCounters | `output_path`, `channel`, `fc_mode_on_launch` |
 
 The lists come from the 2025 controller files (every section of a type sets these keys;
-`hostname` is left out because the files rely on its default). A `[_default]` that itself
-sets one of them hides a missing section from the satellite; the preflight below still
-reports it.
+`hostname` is left out because the files rely on its default). A `[_default]` or
+`[<Type>._default]` that itself sets one of them hides a missing section from that check,
+because every satellite then receives the key; the preflight below reports such a default
+section as a problem, and `--satellites` names the satellites that must have a section.
 
 Check a file before loading it in the controller:
 
 ```sh
-python -m constellation.satellites.EtrocCommon.check_toml run.toml
+python -m constellation.satellites.EtrocCommon.check_toml run.toml \
+    --satellites EtrocTransmitter.One,EtrocReceiver.One
 ```
 
 It reports tables in the old `[satellites.*]` grammar, type names that differ from an ETROC
@@ -63,8 +65,18 @@ type only in case or are 0.x names or close misspellings (with the spelling to u
 top-level tables that are not `[_default]` or a known satellite type (pass `--allow-type X`
 for a C++ satellite of the group), and for every `[<EtrocType>.<name>]` the configuration
 the satellite receives, merged by the controller's own parser (`[_default]` <
-`[<Type>._default]` < `[<Type>.<name>]`), with the required keys missing from it. Exit
-status 0 when clean, 1 with problems, 2 when the file cannot be read.
+`[<Type>._default]` < `[<Type>.<name>]`). It lists the satellite sections it found, and
+reports as problems: a section the satellite would refuse (none of the required keys and no
+`allow_default_config`), required keys in a default section, an expected `--satellites`
+entry without a section, invalid satellite names, and keys the type does not read (with
+the likely spelling for a typo). Required keys partly missing are a note. `$_{VAR}`
+references are checked as written. Exit status 0 when clean, 1 with problems, 2 when the
+file cannot be read.
+
+`compressed_binary` and `save_html` from the 0.x files are not supported in 1.x: the
+satellites never read them, so the preflight reports them and the operator drops the key.
+Of the eleven 2025 controller files, ten set `compressed_binary` and fail the preflight
+until it is removed.
 
 Convert an old file:
 
@@ -74,7 +86,15 @@ python -m constellation.satellites.EtrocCommon.convert_toml old.toml > new.toml
 
 It maps ETROC2Classic to EtrocTransmitter, ETROC2Receiver to EtrocReceiver,
 ETROC2Waveform to EtrocWaveform and ETROC2Counters to EtrocCounters, and keeps keys
-and comments.
+and comments. A parent table that holds keys becomes the matching default section
+(`[satellites.ETROC2Classic]` -> `[EtrocTransmitter._default]`, a bare `[satellites]` ->
+`[_default]`); a `[satellites...]` header it cannot map (quoted keys, `[[...]]`) is refused
+with exit status 1. Run the preflight on the result.
+
+After a `git pull` that adds Python files, re-run the meson editable install
+(`pip install --no-build-isolation -e ".[cli,etroc]"` in the Constellation checkout, as above): the editable
+loader imports only the files it was installed with, so a new module (e.g.
+`EtrocCommon/lifecycle.py`) imports under pytest but not in the satellite process.
 
 ## API changes from 0.7 to 1.0 used here
 
@@ -151,6 +171,22 @@ and comments.
   ends the run files (`run.json` `ended_by = "reentry"`) and releases the board;
   EtrocReceiver closes the data file and writes the not-stopped-cleanly marker. Each step
   logs its own failure and the next one still runs; a second reentry does nothing.
+  Every bounded wait is logged before it starts. A further Ctrl-C during the shutdown is
+  logged ("Ctrl-C ignored: shutdown in progress") and the shutdown continues; a Ctrl-C
+  in the main loop's idle sleep runs the same reentry.
+- The shutdown claims a hardware state only when the board answered a read after the
+  writes: the stop pulse and FC idle go out first, then Reg13 is read back with a 2 s
+  timeout. The log and the `fail_gracefully` status then say "DAQ stopped" / "fast commands
+  idle"; otherwise "DAQ/FC state UNKNOWN: board did not answer", and failed steps are named.
+  A run thread blocked on a stalled board gets its socket shut down and a second 3 s wait;
+  the stop sequence then goes out on a fresh connection. If the thread still runs, no
+  register traffic is sent and the state is reported UNKNOWN. EtrocWaveform sizes its run
+  thread wait from the number of chips (one WS read each).
+- `reconfigure` refuses framework sections (`_data`, `_role`, ...): they need a
+  re-initialize. Register values must be 0-0xFFFF and `num_fifo_read` 1-65536; a register
+  that reads back different from what was written fails the transition (ERROR).
+  `prescale_factor` reprograms the FC memory, but the SEU2025 firmware notes list the Reg10
+  prescale bits as unused, so the change may have no effect on that firmware.
 - `fail_gracefully()` (entering ERROR) runs the same release. For EtrocTransmitter and
   EtrocWaveform this is new: ERROR during a run now also stops the DAQ and idles the FC,
   not only closes the socket.

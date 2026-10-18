@@ -1,0 +1,7 @@
+[EtrocTransmitter.One]
+fast_command_memo = "Start Triggerbit"
+polarity = 0x4123
+active_channel = 1
+timestamp = 0x10
+triggerbit_dleay = 0x1de6
+prescale_factr = 4096

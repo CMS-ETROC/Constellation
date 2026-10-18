@@ -1,0 +1,16 @@
+
+[EtrocTransmitter.One]
+fast_command_memo = "Start Triggerbit"
+polarity = 0x4123
+active_channel = 0x1
+timestamp = 0x10
+fc_delays = 0b0000000010101010
+
+triggerbit_delay = 0x1de6
+
+
+[EtrocReceiver.One]
+output_path = "/home/daq/ETROC2/ETROC-Data/DESY_May2025/beam"
+translate = 0
+compressed_binary = 1
+skip_fillers = 1

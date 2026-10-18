@@ -1,0 +1,16 @@
+[satellites.ETROC2Receiver]
+
+[satellites.ETROC2Receiver.One]
+output_path = "/data"
+translate = 0
+skip_fillers = 1
+
+[satellites.ETROC2Classic]
+triggerbit_delay = 0x1de6
+fc_delays = 0b10101010
+
+[satellites.ETROC2Classic.One]
+fast_command_memo = "Start Triggerbit"
+polarity = 0x4123
+active_channel = 1
+timestamp = 0x10

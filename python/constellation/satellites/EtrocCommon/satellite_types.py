@@ -35,3 +35,31 @@ REQUIRED_KEYS = {
 }
 
 ETROC_TYPES = tuple(OLD_TYPE_NAMES)
+
+# The keys each type reads: its DEFAULT_CONFIG (a test keeps the two equal), so that check_toml
+# can name unknown keys without importing the hardware modules.
+_KC705_KEYS = (
+    "active_channel", "clear_fifo", "connect_timeout", "counter_duration", "data_delays_01", "data_delays_23",
+    "fast_command_memo", "fc_delays", "firmware", "hostname", "num_fifo_read", "polarity", "port",
+    "prescale_factor", "reset_counter", "socket_timeout", "timestamp", "triggerbit_delay",
+)
+CONFIG_KEYS = {
+    "EtrocTransmitter": _KC705_KEYS,
+    "EtrocReceiver": ("flush_interval", "keep_time", "output_path", "skip_fillers", "translate"),
+    "EtrocWaveform": _KC705_KEYS + (
+        "active_boards", "chip_addresses", "chip_names", "i2c_port", "offset", "output_path",
+        "ws_active_channel", "ws_addresses",
+    ),
+    "EtrocCounters": (
+        "channel", "check_layout", "chip_address", "chip_name", "chip_setup", "connect_timeout",
+        "fc_mode_on_launch", "firmware_window_s", "hostname", "i2c_port", "l1a_delay", "output_path", "port",
+        "power_mode", "prescale_factor", "settle_windows", "socket_timeout", "ws_address",
+    ),
+}
+# Keys every type accepts besides its own (config.ALLOW_DEFAULTS_KEY; the counters' register table)
+COMMON_KEYS = ("allow_default_config", "kc705_registers")
+# 0.x keys the 1.x satellites do not implement; the satellite would ignore them silently
+UNSUPPORTED_0X_KEYS = {
+    "compressed_binary": "the 1.x receiver writes no compressed binary output; drop the key",
+    "save_html": "the 1.x satellites write no HTML output; drop the key",
+}

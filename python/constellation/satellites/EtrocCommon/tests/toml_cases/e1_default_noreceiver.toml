@@ -1,0 +1,8 @@
+[_default]
+output_path = "/data/run"
+
+[EtrocTransmitter.One]
+fast_command_memo = "Start Triggerbit"
+polarity = 0x4123
+active_channel = 1
+timestamp = 0x10
