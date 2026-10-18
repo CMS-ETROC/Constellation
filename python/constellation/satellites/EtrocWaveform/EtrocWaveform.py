@@ -136,6 +136,7 @@ class EtrocWaveform(KC705RegisterCommands, Satellite, version=ETROC_SATELLITES_V
         """Configure the Satellite and any associated hardware."""
 
         self._close_connection()
+        self._close_i2c()
         load_typed_config(self, config, self.DEFAULT_CONFIG)
         self._check_memo(self.fast_command_memo)
 
@@ -149,7 +150,10 @@ class EtrocWaveform(KC705RegisterCommands, Satellite, version=ETROC_SATELLITES_V
         # The I2C stack (i2c_gui2, pandas, tqdm) is only needed from here on
         from ..EtrocCommon.new_wrapper_i2cGui2 import i2c_connection
 
-        self.i2c_conn = i2c_connection(self.i2c_port, self.chip_addresses, self.ws_addresses, self.chip_names)
+        self._close_i2c()
+        self.i2c_conn = i2c_connection(
+            self.i2c_port, self.chip_addresses, self.ws_addresses, self.chip_names, logger=self.log
+        )
         self.i2c_conn.batch_PLL_FC_calibration()
         self.i2c_conn.batch_set_chip_peripherals()
         self.i2c_conn.batch_disable_all_chips(power_mode='high')
@@ -191,6 +195,7 @@ class EtrocWaveform(KC705RegisterCommands, Satellite, version=ETROC_SATELLITES_V
     def do_landing(self) -> str:
         self.configure_memo_FC(memo="Triggerbit")
         self._close_connection()
+        self._close_i2c()
 
         self.log.info("Socket shutdown and closed, Fast Command idling")
         return "Landed - Socket shutdown and closed, Fast Command idling"
@@ -282,7 +287,18 @@ class EtrocWaveform(KC705RegisterCommands, Satellite, version=ETROC_SATELLITES_V
         cmd_interpret.close_socket(getattr(self, "connection_socket", None))
         self.connection_socket = None
 
+    def _close_i2c(self) -> None:
+        """Release the USB-ISS adapter if it is open."""
+        conn = getattr(self, "i2c_conn", None)
+        self.i2c_conn = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as e:
+                self.log.warning(f"Closing the I2C adapter failed: {e}")
+
     def fail_gracefully(self) -> str:
-        """Release the KC705 connection when entering ERROR so a later initialize can reconnect."""
+        """Release the KC705 connection and the I2C adapter so a later initialize can reconnect."""
         self._close_connection()
-        return "Failed gracefully, KC705 connection closed"
+        self._close_i2c()
+        return "Failed gracefully, KC705 connection and I2C adapter closed"
