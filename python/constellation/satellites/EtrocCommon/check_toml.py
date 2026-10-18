@@ -43,7 +43,7 @@ from typing import Any
 from constellation.core.controller_configuration import ControllerConfiguration, FileType
 
 from constellation.core.protocol.cscp1 import is_valid_satellite_name, is_valid_satellite_type
-from .satellite_types import COMMON_KEYS, CONFIG_KEYS, ETROC_TYPES, OLD_TYPE_NAMES, REQUIRED_KEYS, UNSUPPORTED_0X_KEYS
+from .satellite_types import CONFIG_KEYS, ETROC_TYPES, OLD_TYPE_NAMES, REQUIRED_KEYS, UNSUPPORTED_0X_KEYS, known_keys
 
 # Framework sections (keys inside a satellite or default section, never satellite types)
 FRAMEWORK_SECTIONS = ("_autonomy", "_conditions", "_data")
@@ -178,7 +178,7 @@ def check(text: str, allow_types: tuple[str, ...] = (), satellites: tuple[str, .
                 f"it, so a missing [<Type>.<name>] section goes unnoticed at initialize; move it to the satellite's "
                 f"own section"
             )
-        elif not k.startswith("_") and not any(k in CONFIG_KEYS[t] or k in COMMON_KEYS for t in ETROC_TYPES):
+        elif not k.startswith("_") and not any(k in known_keys(t) for t in ETROC_TYPES):
             report.errors.append(_unknown_key_problem("[_default]", k, sorted({x for t in ETROC_TYPES for x in CONFIG_KEYS[t]})))
 
     instances: list[tuple[str, str]] = []
@@ -236,7 +236,7 @@ def check(text: str, allow_types: tuple[str, ...] = (), satellites: tuple[str, .
                 if isinstance(values, dict) and section.lower() in ("_default", name.lower()):
                     own.update(values)
         for k in own:
-            if k.startswith("_") or k in CONFIG_KEYS[sat_type] or k in COMMON_KEYS:
+            if k.startswith("_") or k in known_keys(sat_type):
                 continue
             report.errors.append(_unknown_key_problem(f"[{sat_type}.{name}]", k, known))
 

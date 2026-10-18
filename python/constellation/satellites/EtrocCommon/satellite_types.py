@@ -56,8 +56,15 @@ CONFIG_KEYS = {
         "power_mode", "prescale_factor", "settle_windows", "socket_timeout", "ws_address",
     ),
 }
-# Keys every type accepts besides its own (config.ALLOW_DEFAULTS_KEY; the counters' register table)
-COMMON_KEYS = ("allow_default_config", "kc705_registers")
+# Keys every type accepts besides its own (config.ALLOW_DEFAULTS_KEY)
+COMMON_KEYS = ("allow_default_config",)
+# Sections a type reads besides DEFAULT_CONFIG (load_typed_config extra_keys)
+EXTRA_KEYS = {"EtrocCounters": ("kc705_registers",)}
+
+
+def known_keys(sat_type: str) -> tuple[str, ...]:
+    """Every top-level key the type reads: CONFIG_KEYS, its EXTRA_KEYS and COMMON_KEYS."""
+    return CONFIG_KEYS[sat_type] + EXTRA_KEYS.get(sat_type, ()) + COMMON_KEYS
 # 0.x keys the 1.x satellites do not implement; the satellite would ignore them silently
 UNSUPPORTED_0X_KEYS = {
     "compressed_binary": "the 1.x receiver writes no compressed binary output; drop the key",

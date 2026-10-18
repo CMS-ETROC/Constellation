@@ -20,6 +20,7 @@ from typing import Any
 from constellation.core.configuration import Configuration
 
 from .config import get_typed, user_keys
+from .satellite_types import CONFIG_KEYS, known_keys
 
 LAND_HINT = "land and re-initialize to change it"
 
@@ -85,11 +86,15 @@ class EtrocReconfigure:
         if fixed:
             names = ", ".join(f"'{k}'" for k in fixed)
             raise ValueError(f"{sat_type}: {names} cannot change in ORBIT; {LAND_HINT}")
-        unknown = sorted(set(keys) - set(self.DEFAULT_CONFIG) - changeable)
+        known = set(known_keys(sat_type)) if sat_type in CONFIG_KEYS else set(self.DEFAULT_CONFIG)
+        unknown = sorted(set(keys) - known - changeable)
         if unknown:
-            self.log.warning(
-                f"reconfigure keys not used by {sat_type}: {unknown} (Constellation refuses unused keys)"
-            )
+            # Constellation would refuse them as unused inside the transition, i.e. in ERROR
+            raise ValueError(f"{sat_type} does not read {unknown}; reconfigure refused (check the spelling)")
+        not_here = sorted(k for k in keys if k in known and k not in self.DEFAULT_CONFIG and k not in changeable)
+        if not_here:
+            names = ", ".join(f"'{k}'" for k in not_here)
+            raise ValueError(f"{sat_type}: {names} cannot change in ORBIT; {LAND_HINT}")
         plan = {k: get_typed(partial, k, self.DEFAULT_CONFIG[k]) for k in keys if k in self.RECONFIGURABLE_KEYS}
         plan.update(self._plan_sections(partial))
         self._validate_settings(plan)

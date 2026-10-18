@@ -244,3 +244,13 @@ def test_environment_references_are_checked_as_written():
 @pytest.mark.parametrize("cls", [EtrocTransmitter, EtrocReceiver, EtrocWaveform, EtrocCounters])
 def test_preflight_key_lists_match_the_satellites(cls):
     assert sorted(CONFIG_KEYS[cls.__name__]) == sorted(cls.DEFAULT_CONFIG)
+
+
+def test_kc705_registers_is_a_counters_key_only():
+    text = (
+        '[EtrocTransmitter.One]\nfast_command_memo = "Start Triggerbit"\npolarity = 1\nactive_channel = 1\n'
+        'timestamp = 1\n\n[EtrocTransmitter.One.kc705_registers]\ntriggerbit_delay = 1\n'
+    )
+    assert any("unknown key `kc705_registers`" in e for e in check_toml.check(text).errors)
+    counters = '[EtrocCounters.C]\noutput_path = "/d"\nchannel = 0\nfc_mode_on_launch = "idle"\n\n[EtrocCounters.C.kc705_registers]\ntriggerbit_delay = 1\n'
+    assert check_toml.check(counters).ok
