@@ -4,7 +4,9 @@ SPDX-License-Identifier: EUPL-1.2
 
 Counter scans: trigger-bit noise scan around the auto-calibrated baseline, and the
 fast QInj S-curve edges (binary search or full sweep), as done in 2023-24 with
-i2c_gui `scripts/TIDboard_noisePeak.py` and ETROC-DAQ `Save_FPGA_data`.
+i2c_gui `scripts/TIDboard_noisePeak.py` and ETROC-DAQ `Save_FPGA_data`; and the ACC
+scan (measurement plan A1): the pixel's own discriminator duty cycle (threshold-
+calibration accumulator, bypass mode) against the trigger-bit and data counters.
 
 Outputs, under `<output_path>/<YYYY-MM-DD>_Array_Test_Results/`:
 - one directory per pixel (and charge) with the 7-column `FPGA_Data.dat` the old
@@ -24,12 +26,12 @@ import math
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
-from .chipio import DAC_MAX, OPEN_WINDOWS, QSEL_MAX, ChipIO
-from .counters import WINDOW_S, CounterReader, CounterWindow
+from .chipio import ACC_WINDOW_CLK40, DAC_MAX, OPEN_WINDOWS, QSEL_MAX, ChipIO
+from .counters import WINDOW_CLK40, WINDOW_S, CounterReader, CounterWindow
 
 # L1Adelay used on the bench with the qinj_l1a pattern (KC7-SW-008: the pattern spaces L1A 0x1f8 BX after QInj)
 QINJ_L1A_SPACING_DEFAULT_DELAY = 0x1F5
@@ -71,15 +73,27 @@ QINJ_SCURVE_KEYS = {
     "pixels", "qsels", "method", "turn_on", "turn_off", "turnoff_counter", "turnoff_dac_max",
     "dac_min", "dac_max", "step", "tag",
 }
+ACC_SCAN_KEYS = {
+    "pixels", "qsel", "together", "rel_min", "rel_max", "fine_range", "fine_step", "coarse_step", "center",
+    "dac_min", "dac_max", "acc_reads", "windows", "tag",
+}
+ACC_SCAN_DEFAULTS = {
+    "rel_min": -16, "rel_max": 24, "fine_range": 8, "fine_step": 1, "coarse_step": 4, "acc_reads": 3, "windows": 3,
+}
+# upper end of the turn-off bisection that centres an ACC scan with charge injection (as qinj_scurve)
+ACC_TURNOFF_DAC_MAX = 1020
 
 
 def validate_scan_params(kind: str, params: dict[str, Any]) -> None:
     """Reject unknown keys and malformed values before a scan thread is started."""
-    allowed = {"noise_scan": NOISE_SCAN_KEYS, "qinj_scurve": QINJ_SCURVE_KEYS}[kind]
+    allowed = {"noise_scan": NOISE_SCAN_KEYS, "qinj_scurve": QINJ_SCURVE_KEYS, "acc_scan": ACC_SCAN_KEYS}[kind]
     unknown = sorted(set(params) - allowed)
     if unknown:
         raise ValueError(f"{kind}: unknown parameters {unknown}; allowed {sorted(allowed)}")
     parse_pixels(params.get("pixels"))
+    if kind == "acc_scan":
+        _validate_acc_params(params)
+        return
     for key in ("rel_min", "rel_max", "step", "dac_min", "dac_max", "turnoff_dac_max"):
         if key in params and not (isinstance(params[key], int) and not isinstance(params[key], bool)):
             raise ValueError(f"{kind}: '{key}' must be an integer")
@@ -105,6 +119,53 @@ def validate_scan_params(kind: str, params: dict[str, Any]) -> None:
         raise ValueError("qinj_scurve: method must be 'binary' or 'sweep'")
     if params.get("turnoff_counter", "data") not in ("data", "trigbit"):
         raise ValueError("qinj_scurve: turnoff_counter must be 'data' or 'trigbit'")
+
+
+def _validate_acc_params(params: dict[str, Any]) -> None:
+    for key in ("rel_min", "rel_max", "fine_range", "fine_step", "coarse_step", "center", "dac_min", "dac_max",
+                "acc_reads", "windows"):
+        if key in params and not (isinstance(params[key], int) and not isinstance(params[key], bool)):
+            raise ValueError(f"acc_scan: '{key}' must be an integer")
+    for key in ("fine_step", "coarse_step", "acc_reads", "windows"):
+        if params.get(key, 1) < 1:
+            raise ValueError(f"acc_scan: '{key}' must be >= 1")
+    if params.get("fine_range", 0) < 0:
+        raise ValueError("acc_scan: 'fine_range' must be >= 0")
+    for key in ("center", "dac_min", "dac_max"):
+        if key in params and not 0 <= params[key] <= DAC_MAX:
+            raise ValueError(f"acc_scan: '{key}' outside 0-{DAC_MAX}")
+    if ("dac_min" in params) != ("dac_max" in params):
+        raise ValueError("acc_scan: give both dac_min and dac_max, or neither")
+    if params.get("dac_min", 0) > params.get("dac_max", DAC_MAX):
+        raise ValueError("acc_scan: dac_min > dac_max")
+    if params.get("rel_min", -16) > params.get("rel_max", 24):
+        raise ValueError("acc_scan: rel_min > rel_max")
+    qsel = params.get("qsel")
+    if qsel is not None and not (isinstance(qsel, int) and not isinstance(qsel, bool) and 0 <= qsel <= QSEL_MAX):
+        raise ValueError(f"acc_scan: qsel must be null (noise) or an integer 0-{QSEL_MAX}")
+    if not isinstance(params.get("together", False), bool):
+        raise ValueError("acc_scan: 'together' must be true or false")
+
+
+def fine_coarse_grid(center: int, lo: int, hi: int, fine_range: int, fine_step: int, coarse_step: int) -> list[int]:
+    """DACs in [lo, hi]: every fine_step within center +- fine_range (counted from center), every coarse_step
+    outside it (counted outwards from the outermost fine points), and lo and hi themselves. Not clipped."""
+    if lo > hi:
+        return []
+    f_lo, f_hi = max(center - fine_range, lo), min(center + fine_range, hi)
+    if f_lo > f_hi:
+        # the fine region lies outside [lo, hi]: coarse steps throughout
+        return sorted(set(range(lo, hi + 1, coarse_step)) | {hi})
+    fine = {d for d in range(center, f_hi + 1, fine_step)} | {d for d in range(center, f_lo - 1, -fine_step)}
+    fine = {d for d in fine if f_lo <= d <= f_hi} or {f_lo}
+    below = set(range(min(fine) - coarse_step, lo - 1, -coarse_step))
+    above = set(range(max(fine) + coarse_step, hi + 1, coarse_step))
+    return sorted(fine | below | above | {lo, hi})
+
+
+def acc_dac_grid(center: int, lo: int, hi: int, fine_range: int, fine_step: int, coarse_step: int) -> list[int]:
+    """fine_coarse_grid with [lo, hi] clipped to the DAC range 0-DAC_MAX first (so 0 or DAC_MAX is an end point)."""
+    return fine_coarse_grid(center, max(lo, 0), min(hi, DAC_MAX), fine_range, fine_step, coarse_step)
 
 
 class ScanAborted(RuntimeError):
@@ -248,12 +309,20 @@ class ScanEngine:
     def _measure(self, row: int, col: int, dac: int, record: dict[str, Any], meta: dict[str, Any], dat) -> CounterWindow:
         self._check_stop()
         self.chip.set_dac(row, col, dac)
-        try:
-            window = self.reader.wait_windows(self.settle_windows, self.stop_event)
-        except InterruptedError as e:
-            raise ScanAborted("scan stopped on request") from e
+        window = self._wait_windows(self.settle_windows)
         dat.write(fpga_data_line(window, dac))
         dat.flush()
+        self._record_window(row, col, dac, window, record, meta)
+        return window
+
+    def _wait_windows(self, increments: int, start_refresh: int | None = None) -> CounterWindow:
+        try:
+            return self.reader.wait_windows(increments, self.stop_event, start_refresh=start_refresh)
+        except InterruptedError as e:
+            raise ScanAborted("scan stopped on request") from e
+
+    def _record_window(self, row, col, dac, window: CounterWindow, record: dict[str, Any], meta: dict[str, Any]) -> None:
+        """One counters.csv row, the status counters and the on_window callback."""
         self._csv_writer.writerow({
             "scan_id": record["scan_id"], "scan_type": record["scan_type"], "phase": meta.get("phase", ""),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(window.unix_time)),
@@ -267,11 +336,10 @@ class ScanEngine:
         })
         self._csv_file.flush()
         self.status["points"] = self.status.get("points", 0) + 1
-        self.status["last"] = {"row": row, "col": col, "dac": dac, "trigbit": window.trigbit,
-                               "data": window.data, "header": window.header}
+        self.status["last"] = {"row": row, "col": col, "dac": dac, "phase": meta.get("phase", ""),
+                               "trigbit": window.trigbit, "data": window.data, "header": window.header}
         if self.on_window is not None:
             self.on_window(window)
-        return window
 
     def _baseline(self, row: int, col: int, autocal: bool) -> tuple[int, int]:
         if not autocal:
@@ -414,6 +482,178 @@ class ScanEngine:
                             record["results"].append(result)
         return record
 
+    # ------------------------------------------------------------------ ACC scan
+    def acc_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Measurement plan A1: per DAC, the pixel's discriminator duty cycle from its own threshold-calibration
+        accumulator (C1 = ACC/32768, bypass mode) against the trigger-bit counter (C2 = trigbit per clk40 of
+        the 1 s window) and the data counter under L1A (C3 = data/header).
+
+        params: pixels (required); qsel (null: noise, QInjEn 0; an int: QInjEn 1, QSel, L1Adelay = l1a_delay);
+        rel_min (-16) .. rel_max (24) around `center`, or dac_min/dac_max absolute; fine_step (1) within
+        center +- fine_range (8), coarse_step (4) outside; center (default: the auto-cal BL for noise, the
+        data-counter turn-off found by bisection for qsel); acc_reads (3); windows (3); together (false):
+        afterwards all listed pixels enabled at once (the OR term); tag ("").
+
+        Noise, per DAC: DAC; RSTn_THCal pulse; ScanStart_THCal rising edge; 2 ms; ScanDone and ACC
+        acc_reads times; `windows` settled windows with FC idle (C2); FC qinj_l1a and `windows` settled
+        windows (C3); FC idle. With qsel the charge must be injected while ACC and the trigger bits are
+        counted, so the FC stays qinj_l1a for the whole scan and the same windows give C2 and C3.
+        """
+        validate_scan_params("acc_scan", params)
+        pixels = parse_pixels(params.get("pixels"))
+        opt = {**ACC_SCAN_DEFAULTS, **{k: v for k, v in params.items() if k in ACC_SCAN_DEFAULTS}}
+        qsel = params.get("qsel")
+        together = bool(params.get("together", False))
+        tag = str(params.get("tag", ""))
+        absolute = "dac_min" in params
+        if qsel is not None and self.l1a_delay != QINJ_L1A_SPACING_DEFAULT_DELAY:
+            self.log.warning(
+                f"l1a_delay 0x{self.l1a_delay:03x} differs from 0x{QINJ_L1A_SPACING_DEFAULT_DELAY:03x}: "
+                f"C3 headers may carry no hits")
+
+        fields = {"disDataReadout": 0, "QInjEn": 0 if qsel is None else 1, "disTrigPath": 0, "Bypass_THCal": 1,
+                  "CLKEn_THCal": 1, "BufEn_THCal": 1, "enable_TDC": 1, **OPEN_WINDOWS}
+        if qsel is not None:
+            fields.update({"QSel": qsel, "L1Adelay": self.l1a_delay})
+        meta_base = {"qsel": "" if qsel is None else qsel, "charge_fC": "" if qsel is None else qsel + 1}
+        scan_type = "ACCScan_Noise" if qsel is None else f"ACCScan_QInj_{qsel}"
+
+        with self._scan_files(scan_type + tag, dict(params)) as record:
+            record["center_search_files"] = []
+            calibration = {}
+            with self._fc_session("idle"):
+                for row, col in pixels:
+                    self._check_stop()
+                    with self._pixel_session(row, col):
+                        calibration[(row, col)] = self._baseline(row, col, autocal=True)
+            centers = {}
+            with self._fc_session("idle" if qsel is None else "qinj_l1a"):
+                for row, col in pixels:
+                    bl, nw = calibration[(row, col)]
+                    meta = {**meta_base, "baseline": bl, "noise_width": nw}
+                    with self._pixel_session(row, col):
+                        self.chip.write_pixel(row, col, {**fields, "DAC": DAC_MAX})
+                        center = self._acc_center(row, col, bl, qsel, params, record, meta)
+                        centers[(row, col)] = center
+                        lo, hi = (params["dac_min"], params["dac_max"]) if absolute else \
+                            (center + opt["rel_min"], center + opt["rel_max"])
+                        dacs = acc_dac_grid(center, lo, hi, opt["fine_range"], opt["fine_step"], opt["coarse_step"])
+                        if not dacs:
+                            raise ValueError(f"empty DAC grid for pixel ({row},{col})")
+                        points = [self._acc_point([(row, col)], [dac], qsel, opt, record, meta) for dac in dacs]
+                    record["results"].append(summarise_acc(row, col, bl, nw, center, qsel, points))
+                if together and len(pixels) > 1:
+                    record["results"].append(self._acc_together(pixels, calibration, centers, fields, qsel, opt,
+                                                                 params, absolute, record, meta_base))
+        return record
+
+    def _acc_center(self, row, col, bl, qsel, params, record, meta) -> int:
+        """Centre of the fine region: `center` if given, else BL (noise) or the data-counter turn-off (qsel)."""
+        if "center" in params:
+            return int(params["center"])
+        if qsel is None:
+            return bl
+        path = Path(record["scan_dir"]) / f"center_search_R{row}_C{col}_QInj_{qsel}.dat"
+        record["center_search_files"].append(str(path))
+        with open(path, "w") as dat:
+            found = self._bisect_turn_off(row, col, max(bl, 0), ACC_TURNOFF_DAC_MAX, "data", record,
+                                          {**meta, "phase": "center_search"}, dat)
+        self.log.info(f"Pixel ({row},{col}) QSel {qsel}: turn-off (data counter) at DAC {found['dac']}")
+        return int(found["dac"])
+
+    def _acc_together(self, pixels, calibration, centers, fields, qsel, opt, params, absolute, record, meta_base):
+        """All listed pixels enabled at once; each at its own centre + offset (or one absolute DAC)."""
+        with ExitStack() as stack:
+            for row, col in pixels:
+                stack.enter_context(self._pixel_session(row, col))
+            for row, col in pixels:
+                self.chip.write_pixel(row, col, {**fields, "DAC": DAC_MAX})
+            if absolute:
+                mean_center = round(sum(centers.values()) / len(centers))
+                grid = [[d] * len(pixels) for d in acc_dac_grid(
+                    mean_center, params["dac_min"], params["dac_max"], opt["fine_range"], opt["fine_step"],
+                    opt["coarse_step"])]
+                offsets = [None] * len(grid)
+            else:
+                offsets, grid = [], []
+                for off in fine_coarse_grid(0, opt["rel_min"], opt["rel_max"], opt["fine_range"], opt["fine_step"],
+                                            opt["coarse_step"]):
+                    dacs = [centers[p] + off for p in pixels]
+                    if all(0 <= d <= DAC_MAX for d in dacs):
+                        offsets.append(off)
+                        grid.append(dacs)
+            meta = {**meta_base, "baseline": ";".join(str(calibration[p][0]) for p in pixels),
+                    "noise_width": ";".join(str(calibration[p][1]) for p in pixels)}
+            points = []
+            for off, dacs in zip(offsets, grid):
+                point = self._acc_point(pixels, dacs, qsel, opt, record, meta)
+                point["rel"] = off
+                c1 = point["c1"]
+                none_high = 1.0
+                for c in c1:
+                    none_high *= 1.0 - c
+                # expected OR of independent pixels, for comparison with C2
+                point["c1_or_indep"] = 1.0 - none_high
+                points.append(point)
+        return {"pixels": [list(p) for p in pixels], "together": True, "qsel": qsel,
+                "baselines": [calibration[p][0] for p in pixels], "noise_widths": [calibration[p][1] for p in pixels],
+                "centers": [centers[p] for p in pixels], "n_points": len(points), "points": points,
+                "flagged_points": [p["dac"] for p in points if p.get("flag")]}
+
+    def _acc_point(self, group, dacs, qsel, opt, record, meta) -> dict[str, Any]:
+        """One DAC step of the A1 procedure for one pixel (or a group enabled together)."""
+        self._check_stop()
+        for (row, col), dac in zip(group, dacs):
+            self.chip.set_dac(row, col, dac)
+        accs, dones = [], []
+        for row, col in group:
+            acc, done = self.chip.measure_acc(row, col, opt["acc_reads"])
+            accs.append(acc)
+            dones.append(done)
+        if len(group) == 1:
+            row, col = group[0]
+            csv_dac = dacs[0]
+        else:
+            row, col = ";".join(str(p[0]) for p in group), ";".join(str(p[1]) for p in group)
+            csv_dac = ";".join(str(d) for d in dacs)
+        if qsel is None:
+            c2_windows = self._acc_windows(opt["windows"], row, col, csv_dac, record, {**meta, "phase": "c2_idle"})
+            self.set_fc_mode("qinj_l1a")
+            c3_windows = self._acc_windows(opt["windows"], row, col, csv_dac, record,
+                                           {**meta, "phase": "c3_qinj_l1a"})
+            self.set_fc_mode("idle")
+        else:
+            c2_windows = c3_windows = self._acc_windows(opt["windows"], row, col, csv_dac, record,
+                                                        {**meta, "phase": "c2c3_qinj_l1a"})
+        trig = [w.trigbit for w in c2_windows]
+        data = [w.data for w in c3_windows]
+        header = [w.header for w in c3_windows]
+        c1 = [sum(a) / len(a) / ACC_WINDOW_CLK40 for a in accs]
+        point = {
+            "dac": dacs[0] if len(group) == 1 else list(dacs),
+            "acc": accs[0] if len(group) == 1 else accs,
+            "scan_done": dones[0] if len(group) == 1 else dones,
+            "c1": c1[0] if len(group) == 1 else c1,
+            "c2": trig,
+            "c2_duty": sum(trig) / len(trig) / WINDOW_CLK40,
+            "c3": {"data": data, "header": header},
+            "c3_eff": sum(data) / sum(header) if sum(header) else None,
+        }
+        if any(v != 1 for done in dones for v in done):
+            point["flag"] = "scan_done_not_1"
+            self.log.warning(f"ACC scan pixel(s) {group} DAC {dacs}: ScanDone read {dones}, point flagged")
+        self.status["acc_points"] = self.status.get("acc_points", 0) + 1
+        return point
+
+    def _acc_windows(self, n, row, col, dac, record, meta) -> list[CounterWindow]:
+        """`n` consecutive windows, the first one settled (settle_windows after the last change)."""
+        windows = [self._wait_windows(self.settle_windows)]
+        while len(windows) < n:
+            windows.append(self._wait_windows(1, start_refresh=windows[-1].refresh))
+        for w in windows:
+            self._record_window(row, col, dac, w, record, meta)
+        return windows
+
     def _bisect_turn_on(self, row, col, upper, record, meta, dat) -> dict[str, Any]:
         """Lowest DAC in [0, upper] with trigger bits > 0 (pixel_turnon_points)."""
         a, b = 0, int(upper)
@@ -488,3 +728,61 @@ def summarise_sweep(points: list[tuple[int, int, int, int]], counter: str) -> di
         "turn_off": {"dac": max(passing) if passing else None, "counter": counter, "found": bool(passing)},
         "points": [{"dac": d, "trigbit": t, "data": data, "header": h} for d, t, data, h in points],
     }
+
+
+def level_crossing(points: list[tuple[int, float]], level: float, center: float) -> float | None:
+    """DAC where the curve crosses `level` (linear interpolation between neighbouring points), the crossing
+    nearest `center` if there are several; None if it never crosses."""
+    found = []
+    for (d0, v0), (d1, v1) in zip(points, points[1:]):
+        if v0 == level:
+            found.append(float(d0))
+        elif (v0 - level) * (v1 - level) < 0:
+            found.append(d0 + (level - v0) * (d1 - d0) / (v1 - v0))
+    if points and points[-1][1] == level:
+        found.append(float(points[-1][0]))
+    return min(found, key=lambda x: abs(x - center)) if found else None
+
+
+def summarise_acc(row: int, col: int, bl: int, nw: int, center: int, qsel: int | None,
+                  points: list[dict[str, Any]]) -> dict[str, Any]:
+    """Derived quantities of one pixel's three curves.
+
+    `<curve>_bl` is the DAC where the curve crosses 0.5, `<curve>_nw` half the DAC distance between its
+    0.16 and 0.84 crossings (one sigma for a Gaussian-noise S-curve), for curve = acc (C1), trig (C2) and
+    data (C3). Noise: absolute levels. With qsel the curves are divided by their maximum first (C1 and C2
+    then reach only the pulse duty cycle, about pulse BX per orbit), so the crossings are the 50 % turn-off.
+    `acc_bl_vs_cal` = acc_bl - auto-cal BL is the positive control of plan A1 (a): within 1 LSB in noise mode.
+    `acc_nw_transition` is the manual's NW definition (DAC codes with 0 < ACC < 32768), meaningful on a
+    fine grid.
+    """
+    dacs = [p["dac"] for p in points]
+    result: dict[str, Any] = {
+        "row": row, "col": col, "qsel": qsel, "charge_fC": None if qsel is None else qsel + 1,
+        "baseline": bl, "noise_width": nw, "center": center, "dac_min": dacs[0], "dac_max": dacs[-1],
+        "n_points": len(points), "normalisation": "absolute" if qsel is None else "plateau",
+    }
+    curves = {"acc": [p["c1"] for p in points], "trig": [p["c2_duty"] for p in points],
+              "data": [p["c3_eff"] for p in points]}
+    for name, values in curves.items():
+        pts = [(d, v) for d, v in zip(dacs, values) if v is not None]
+        if qsel is not None:
+            plateau = max((v for _, v in pts), default=0.0)
+            result[f"{name}_plateau"] = plateau
+            pts = [(d, v / plateau) for d, v in pts] if plateau > 0 else []
+        bl50 = level_crossing(pts, 0.5, center)
+        lo, hi = level_crossing(pts, 0.16, center), level_crossing(pts, 0.84, center)
+        result[f"{name}_bl"] = bl50
+        result[f"{name}_nw"] = abs(hi - lo) / 2.0 if lo is not None and hi is not None else None
+    acc_bl = result["acc_bl"]
+    result["acc_bl_vs_cal"] = acc_bl - bl if acc_bl is not None else None
+    if qsel is None:
+        result["positive_control"] = None if acc_bl is None else ("pass" if abs(acc_bl - bl) <= 1 else "fail")
+    mean_acc = [sum(p["acc"]) / len(p["acc"]) for p in points]
+    transition = [d for d, a in zip(dacs, mean_acc) if 0 < a < ACC_WINDOW_CLK40]
+    result["acc_nw_transition"] = len(transition)
+    result["flagged_points"] = [p["dac"] for p in points if p.get("flag")]
+    if result["flagged_points"]:
+        result["warning"] = "ScanDone was not 1 at the flagged points: their ACC is not a completed window"
+    result["points"] = points
+    return result

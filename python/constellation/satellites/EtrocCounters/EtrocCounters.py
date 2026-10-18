@@ -5,8 +5,9 @@ SPDX-License-Identifier: EUPL-1.2
 EtrocCounters: the KC705 per-channel counters ("FPGA scalars") as a Constellation satellite.
 
 ORBIT: read the latched 1 s counters of one channel, switch channel and fast-command
-pattern, and run threshold scans (trigger-bit noise peak, QInj S-curve edges) that
-set the pixel DAC over I2C and read one settled window per point.
+pattern, and run threshold scans (trigger-bit noise peak, QInj S-curve edges, and the
+ACC scan of the pixel's own discriminator duty cycle against the counters) that set the
+pixel DAC over I2C and read settled windows per point.
 RUN: record every window of the selected channel to the run directory and publish the
 rates as metrics.
 
@@ -214,7 +215,7 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
                 self._chip.setup_chip(self.power_mode)
                 self.log.info("Chip set up: PLL/FC calibration, peripherals, all pixels disabled")
         else:
-            self.log.warning("i2c_port is empty: counters only, noise_scan/qinj_scurve are disabled")
+            self.log.warning("i2c_port is empty: counters only, noise_scan/qinj_scurve/acc_scan are disabled")
 
         self._engine = None
         if self._chip is not None:
@@ -551,6 +552,11 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         """QInj S-curve edges in the background. Payload: [{"pixels": [[row, col]], "qsels": [27]}] or [JSON string]."""
         return self._start_scan("qinj_scurve", _scan_params(params))
 
+    @cscp_requestable(ORBIT)
+    def acc_scan(self, params: dict | str) -> tuple[str, Any, dict]:
+        """ACC duty cycle vs trigger-bit and data counters (plan A1). Payload: [{"pixels": [[row, col]], "qsel": null}]."""
+        return self._start_scan("acc_scan", _scan_params(params))
+
     @cscp_requestable()
     def stop_scan(self) -> tuple[str, Any, dict]:
         """Stop a running scan after the current point; pixel registers and FC pattern are restored."""
@@ -739,7 +745,7 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
 
     def _scan_worker(self, engine: ScanEngine, kind: str, params: dict) -> None:
         try:
-            run = engine.noise_scan if kind == "noise_scan" else engine.qinj_scurve
+            run = {"noise_scan": engine.noise_scan, "qinj_scurve": engine.qinj_scurve, "acc_scan": engine.acc_scan}[kind]
             record = run(params)
             self._scan_result = _summary(record)
             self.log.info(f"{kind} finished: {record['scan_dir']}")

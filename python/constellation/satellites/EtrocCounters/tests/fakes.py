@@ -16,7 +16,7 @@ import struct
 import threading
 import time
 
-from ..chipio import OPEN_WINDOWS, PIXEL_FIELDS, ChipWriteError
+from ..chipio import ACC_WINDOW_CLK40, OPEN_WINDOWS, PIXEL_FIELDS, ChipWriteError
 
 CLK40_PER_WINDOW = 40_000_001
 GAIN_DAC_PER_FC = 6
@@ -50,6 +50,27 @@ def pixel_counts(fields: dict[str, int], bl: int, nw: int, injections: int, head
         fired = injections
     trig = 0 if fields["disTrigPath"] else noise + fired
     data = 0 if fields["disDataReadout"] or headers == 0 else fired
+    return trig, data
+
+
+def level_duty(dac: int, bl: int, nw: int) -> float:
+    """Discriminator duty cycle with Gaussian noise of sigma NW/2: 1 - Phi((DAC - BL) / sigma).
+
+    High at low threshold, low at high threshold (manual section 3.1.3, p. 18-19: the ACC sum is maximum
+    when VTH is at the lower end), 0.5 at BL.
+    """
+    sigma = max(nw / 2.0, 1.0)
+    return 0.5 * math.erfc((dac - bl) / (sigma * math.sqrt(2.0)))
+
+
+def level_counts(fields: dict[str, int], bl: int, nw: int, headers: int) -> tuple[int, int]:
+    """(trigger bits, data hits) when both counters follow the duty cycle: trigbit = clk40 cycles with the
+    discriminator high, data = L1As whose BX found it high (the plan A1 hypothesis (b)/(c) taken literally)."""
+    if not fields["Bypass_THCal"]:
+        return 0, 0
+    duty = level_duty(fields["DAC"], bl, nw)
+    trig = 0 if fields["disTrigPath"] else int(CLK40_PER_WINDOW * duty)
+    data = 0 if fields["disDataReadout"] or headers == 0 else int(headers * duty)
     return trig, data
 
 
@@ -120,6 +141,11 @@ class FakeChip:
         # the board reports whether QInj is in the playing FC pattern (set by FakeKC705)
         self.fc_qinj_playing = lambda: False
         self.autocal_fc_qinj: list[bool] = []
+        # level_model: trigger bits and data follow the discriminator duty cycle (level_counts) instead of
+        # the noise peak of pixel_counts; scan_done_stuck: ScanDone reads 0 after an ACC window
+        self.level_model = False
+        self.scan_done_stuck = False
+        self.acc_calls: list[tuple[int, int, int]] = []
 
     def snapshot(self) -> dict[tuple[int, int], dict[str, int]]:
         with self.lock:
@@ -165,6 +191,20 @@ class FakeChip:
             self.version += 1
             return self.baselines[(row, col)]
 
+    def measure_acc(self, row, col, reads, wait_s=0.0):
+        """ACC = 32768 * duty cycle when Bypass, CLKEn and BufEn of TH_Cal are set, else 0 (manual Table 4)."""
+        with self.lock:
+            self._check_open()
+            f = self.pixels[(row, col)]
+            bl, nw = self.baselines.get((row, col), (500, 4))
+            on = f["Bypass_THCal"] and f["CLKEn_THCal"] and f["BufEn_THCal"]
+            acc = round(ACC_WINDOW_CLK40 * level_duty(f["DAC"], bl, nw)) if on else 0
+            f.update({"RSTn_THCal": 1, "ScanStart_THCal": 1})
+            self.version += 1
+            self.acc_calls.append((row, col, f["DAC"]))
+            done = 0 if self.scan_done_stuck else 1
+            return [acc] * reads, [done] * reads
+
     def close(self):
         self.closed = True
 
@@ -173,7 +213,10 @@ class FakeChip:
         with self.lock:
             for p, f in self.pixels.items():
                 bl, nw = self.baselines.get(p, (500, 4))
-                t, d = pixel_counts(f, bl, nw, injections, headers)
+                if self.level_model:
+                    t, d = level_counts(f, bl, nw, headers)
+                else:
+                    t, d = pixel_counts(f, bl, nw, injections, headers)
                 trig += t
                 data += d
         return trig, data

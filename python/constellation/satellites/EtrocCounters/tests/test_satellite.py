@@ -184,6 +184,22 @@ def test_scan_parameters_as_json_string(setup):
     assert call(tx, "noise_scan", ["{not json"]).verb_type != OK
 
 
+def test_acc_scan_over_cscp(setup):
+    sat, tx, fake, chip, config = setup
+    chip.level_model = True
+    initial = chip.snapshot()
+    launch(sat, tx, config)
+    rep = call(tx, "acc_scan", ['{"pixels": [[2, 5]], "qsel": null, "dac_min": 479, "dac_max": 481, "windows": 1}'])
+    assert rep.verb_type == OK, rep.verb_msg
+    result = wait_scan_done(tx)
+    assert result["status"] == "finished"
+    assert abs(result["results"][0]["acc_bl"] - 480) <= 1
+    assert result["results"][0]["positive_control"] == "pass"
+    assert chip.snapshot() == initial
+    assert call(tx, "read_counters").payload["fc_mode"] == "idle"
+    assert call(tx, "acc_scan", [{"pixels": [[2, 5]], "qsels": [3]}]).verb_type != OK
+
+
 def test_metrics_read_only_the_cache(setup):
     sat, tx, fake, _, config = setup
     launch(sat, tx, config)

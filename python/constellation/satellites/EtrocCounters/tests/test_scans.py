@@ -3,6 +3,7 @@ SPDX-FileCopyrightText: 2025 DESY and the Constellation authors
 SPDX-License-Identifier: EUPL-1.2
 """
 
+import csv
 import json
 import logging
 import threading
@@ -11,7 +12,7 @@ import pytest
 
 from ..chipio import ChipWriteError
 from ..counters import FC_MODES, CounterReader, KC705Link
-from ..scans import ScanAborted, ScanEngine, validate_scan_params
+from ..scans import ScanAborted, ScanEngine, acc_dac_grid, level_crossing, validate_scan_params
 from .fakes import GAIN_DAC_PER_FC, FakeChip, FakeKC705, pixel_counts
 
 WINDOW = 0.03
@@ -203,6 +204,13 @@ def test_repeated_scan_does_not_overwrite_pixel_file(rig):
         ("qinj_scurve", {"pixels": [[0, 0]], "qsels": [32]}),
         ("qinj_scurve", {"pixels": [[0, 0]], "method": "linear"}),
         ("qinj_scurve", {"pixels": []}),
+        ("acc_scan", {"pixels": [[0, 0]], "qsel": 32}),
+        ("acc_scan", {"pixels": [[0, 0]], "qsels": [3]}),
+        ("acc_scan", {"pixels": [[0, 0]], "dac_max": 400}),
+        ("acc_scan", {"pixels": [[0, 0]], "fine_step": 0}),
+        ("acc_scan", {"pixels": [[0, 0]], "windows": 0}),
+        ("acc_scan", {"pixels": [[0, 0]], "together": 1}),
+        ("acc_scan", {"pixels": [[0, 0]], "rel_min": 5, "rel_max": -5}),
     ],
 )
 def test_bad_scan_parameters_are_rejected(kind, params):
@@ -225,3 +233,150 @@ def test_auto_calibration_runs_without_charge_injection(rig):
     assert rig.fc_mode == "qinj_l1a"
     rig.set_fc_mode("idle")
     rig.assert_clean()
+
+
+# ------------------------------------------------------------------- acc_scan
+ACC_SMALL = {"rel_min": -6, "rel_max": 8, "fine_range": 3, "coarse_step": 3, "acc_reads": 2, "windows": 2}
+
+
+def test_acc_scan_positive_control_and_c2_tracks_c1(rig):
+    rig.chip.level_model = True
+    record = rig.engine.acc_scan({"pixels": [list(PIXEL)], **ACC_SMALL})
+    (res,) = record["results"]
+    assert res["baseline"] == BL and res["center"] == BL
+    assert abs(res["acc_bl"] - BL) <= 1
+    assert res["acc_bl_vs_cal"] == res["acc_bl"] - BL
+    assert res["positive_control"] == "pass"
+    assert res["flagged_points"] == []
+    for point in res["points"]:
+        assert len(point["acc"]) == 2 and point["scan_done"] == [1, 1]
+        assert len(point["c2"]) == 2 and len(point["c3"]["header"]) == 2
+        assert abs(point["c2_duty"] - point["c1"]) < 0.05
+        assert abs(point["c3_eff"] - point["c1"]) < 0.05
+        assert set(point["c3"]["header"]) == {11223}
+    assert abs(res["trig_bl"] - BL) <= 1 and abs(res["data_bl"] - BL) <= 1
+    # one ACC window per DAC, in grid order
+    assert [d for _, _, d in rig.chip.acc_calls] == [p["dac"] for p in res["points"]]
+
+    scan = json.load(open(f"{record['scan_dir']}/scan.json"))
+    assert scan["status"] == "finished"
+    rows = list(csv.DictReader(open(f"{record['scan_dir']}/counters.csv")))
+    n = len(res["points"])
+    assert len(rows) == 2 * 2 * n
+    assert [r["phase"] for r in rows[:4]] == ["c2_idle", "c2_idle", "c3_qinj_l1a", "c3_qinj_l1a"]
+    assert {r["fc_mode"] for r in rows if r["phase"] == "c2_idle"} == {"idle"}
+    assert {r["header"] for r in rows if r["phase"] == "c2_idle"} == {"0"}
+    assert [int(r["dac"]) for r in rows[::4]] == [p["dac"] for p in res["points"]]
+    rig.assert_clean()
+
+
+def test_acc_scan_scan_done_stuck_flags_points_and_finishes(rig):
+    rig.chip.level_model = True
+    rig.chip.scan_done_stuck = True
+    record = rig.engine.acc_scan({"pixels": [list(PIXEL)], "dac_min": BL - 1, "dac_max": BL + 1, "windows": 1})
+    (res,) = record["results"]
+    assert record["status"] == "finished"
+    assert res["flagged_points"] == [BL - 1, BL, BL + 1]
+    assert all(p["flag"] == "scan_done_not_1" for p in res["points"])
+    assert "warning" in res
+    rig.assert_clean()
+
+
+def test_acc_scan_stop_during_c3_restores_registers_and_fc_mode(rig):
+    rig.chip.level_model = True
+    errors = []
+
+    def run():
+        try:
+            rig.engine.acc_scan({"pixels": [list(PIXEL)], "windows": 3})
+        except Exception as e:
+            errors.append(e)
+
+    t = threading.Thread(target=run)
+    t.start()
+    while (rig.engine.status.get("last") or {}).get("phase") != "c3_qinj_l1a":
+        assert t.is_alive()
+        t.join(0.005)
+    assert rig.fc_mode == "qinj_l1a"
+    rig.engine.stop_event.set()
+    t.join(10)
+    assert not t.is_alive()
+    assert len(errors) == 1 and isinstance(errors[0], ScanAborted)
+    assert rig.engine.status["state"] == "aborted"
+    rig.assert_clean()
+
+
+def test_acc_scan_with_charge_keeps_qinj_and_centres_on_turn_off(rig):
+    qsel = 4
+    record = rig.engine.acc_scan({"pixels": [list(PIXEL)], "qsel": qsel, "rel_min": -2, "rel_max": 2,
+                                  "fine_range": 1, "windows": 1, "acc_reads": 1})
+    (res,) = record["results"]
+    assert res["center"] == BL + GAIN_DAC_PER_FC * (qsel + 1)
+    assert res["normalisation"] == "plateau"
+    assert len(record["center_search_files"]) == 1
+    rows = list(csv.DictReader(open(f"{record['scan_dir']}/counters.csv")))
+    assert {r["phase"] for r in rows} == {"center_search", "c2c3_qinj_l1a"}
+    assert {r["fc_mode"] for r in rows} == {"qinj_l1a"}
+    assert rig.chip.autocal_fc_qinj == [False]
+    rig.assert_clean()
+
+
+def test_acc_scan_together_enables_all_listed_pixels(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        other = (4, 7)
+        rig.chip.baselines[other] = (510, 4)
+        rig.chip.level_model = True
+        seen = []
+        measure = rig.chip.measure_acc
+
+        def spy(row, col, reads, wait_s=0.0):
+            enabled = sorted(p for p, f in rig.chip.pixels.items() if f["Bypass_THCal"] and not f["disTrigPath"])
+            seen.append(((row, col), enabled))
+            return measure(row, col, reads, wait_s)
+
+        rig.chip.measure_acc = spy
+        record = rig.engine.acc_scan({"pixels": [list(PIXEL), list(other)], "together": True,
+                                      "rel_min": -1, "rel_max": 1, "fine_range": 1, "windows": 1, "acc_reads": 1})
+        single_a, single_b, group = record["results"]
+        assert single_a["baseline"] == BL and single_b["baseline"] == 510
+        assert group["together"] and group["centers"] == [BL, 510]
+        assert [p["rel"] for p in group["points"]] == [-1, 0, 1]
+        assert group["points"][1]["dac"] == [BL, 510]
+        assert all(len(p["c1"]) == 2 and 0 <= p["c1_or_indep"] <= 1 for p in group["points"])
+        # single-pixel curves: only that pixel enabled; together: both
+        assert {tuple(e) for _, e in seen[:3]} == {(PIXEL,)}
+        assert {tuple(e) for _, e in seen[3:6]} == {(other,)}
+        assert {tuple(e) for _, e in seen[6:]} == {(PIXEL, other)}
+        rig.assert_clean()
+    finally:
+        rig.close()
+
+
+def test_acc_dac_grid_fine_inside_coarse_outside():
+    grid = acc_dac_grid(383, 383 - 16, 383 + 24, 8, 1, 4)
+    assert grid == [367, 371] + list(range(375, 392)) + [395, 399, 403, 407]
+    # coarse steps only, when the fine region is outside an absolute range
+    assert acc_dac_grid(383, 400, 410, 8, 1, 4) == [400, 404, 408, 410]
+    # absolute range around the centre, end points kept, clipped to the DAC range
+    assert acc_dac_grid(5, 0, 30, 2, 1, 10) == [0, 3, 4, 5, 6, 7, 17, 27, 30]
+    assert acc_dac_grid(1020, 1000, 1030, 2, 2, 4)[-3:] == [1020, 1022, 1023]
+
+
+def test_acc_scan_absolute_override_sets_the_grid(rig):
+    rig.chip.level_model = True
+    record = rig.engine.acc_scan({"pixels": [list(PIXEL)], "dac_min": 490, "dac_max": 510, "fine_range": 2,
+                                  "coarse_step": 5, "windows": 1, "acc_reads": 1})
+    (res,) = record["results"]
+    assert [p["dac"] for p in res["points"]] == [490, 493, 498, 499, 500, 501, 502, 507, 510]
+    assert res["baseline"] == BL
+    rig.assert_clean()
+
+
+def test_level_crossing_interpolates_nearest_the_centre():
+    falling = [(0, 1.0), (2, 0.6), (4, 0.2), (6, 0.0)]
+    assert level_crossing(falling, 0.5, 3) == pytest.approx(2.5)
+    assert level_crossing(falling, 0.2, 3) == 4.0
+    peak = [(0, 0.0), (1, 1.0), (2, 0.0)]
+    assert level_crossing(peak, 0.5, 1.8) == pytest.approx(1.5)
+    assert level_crossing([(0, 0.1), (1, 0.2)], 0.5, 0) is None

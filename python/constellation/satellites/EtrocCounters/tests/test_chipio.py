@@ -14,11 +14,12 @@ class StubChip:
     """Register cache + 'hardware' dict, with optional stuck fields that ignore writes."""
 
     def __init__(self, stuck=()):
-        self.hw = {f: 0 for f in PIXEL_FIELDS} | {"ScanDone": 1}
+        self.hw = {f: 0 for f in PIXEL_FIELDS} | {"ScanDone": 1, "ACC": 0}
         self.cache = dict(self.hw)
         self.stuck = set(stuck)
         self.broadcast = True
         self.row = self.col = None
+        self.writes = []
 
     def read_all_block(self, chip, block):
         self.cache.update(self.hw)
@@ -35,6 +36,7 @@ class StubChip:
         return self.cache[name]
 
     def write_decoded_value(self, chip, block, name):
+        self.writes.append((name, self.cache[name]))
         if name not in self.stuck:
             self.hw[name] = self.cache[name]
 
@@ -86,3 +88,17 @@ def test_auto_calibration_requires_scan_done():
     assert make().auto_calibrate(1, 1) == (512, 5)
     with pytest.raises(ChipWriteError, match="ScanDone"):
         make(scan_done=0).auto_calibrate(1, 1)
+
+
+def test_measure_acc_resets_starts_and_reads_every_value():
+    io = make()
+    io.chip.hw["ACC"] = 16384
+    acc, done = io.measure_acc(3, 4, reads=3, wait_s=0)
+    assert (io.chip.row, io.chip.col, io.chip.broadcast) == (3, 4, False)
+    assert io.chip.writes == [("RSTn_THCal", 0), ("RSTn_THCal", 1), ("ScanStart_THCal", 0), ("ScanStart_THCal", 1)]
+    assert acc == [16384] * 3 and done == [1] * 3
+
+
+def test_measure_acc_stuck_scan_start_raises():
+    with pytest.raises(ChipWriteError, match="ScanStart_THCal"):
+        make(stuck={"ScanStart_THCal"}).measure_acc(0, 0, reads=1, wait_s=0)

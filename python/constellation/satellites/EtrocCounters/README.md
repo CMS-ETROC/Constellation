@@ -126,6 +126,7 @@ scan runs.
 | `set_fc_mode` | `"idle"` (IDLE only), `"qinj_l1a"` (QInj at BX 5 and L1A at BX 509 of every orbit, about 11,223 per second) or `"custom <memo>"` (EtrocTransmitter memo words; must contain `Start` and `Triggerbit`) | ORBIT |
 | `noise_scan` | dict or JSON string, see below | ORBIT |
 | `qinj_scurve` | dict or JSON string, see below | ORBIT |
+| `acc_scan` | dict or JSON string, see below | ORBIT |
 | `stop_scan` | none | any |
 | `get_scan_status`, `get_scan_result` | none | any |
 | `check_status_layout` | none | ORBIT |
@@ -157,6 +158,29 @@ other than 0x1F5 the log warns: the qinj_l1a pattern puts the L1A 504 BX after t
   stops with an error if that header count is 0.
 - Both searches re-measure the result DAC last, so the last line of `FPGA_Data.dat` holds it.
 
+`acc_scan` (measurement A1 of the ETROC-DAQ measurement plan, `notes/measurement-plan-2026-10.md`:
+the pixel's own discriminator duty cycle against the trigger-bit and data counters):
+`pixels` `[[row, col], ...]` (required; scanned one at a time, all other pixels stay as
+they are, i.e. disabled after the chip setup); `qsel` (null: noise, `QInjEn=0`; an
+integer: `QInjEn=1`, `QSel`, `L1Adelay = l1a_delay`); `rel_min` (-16) .. `rel_max` (24)
+around `center`, or `dac_min` / `dac_max` absolute; `fine_step` (1) within `center` ±
+`fine_range` (8) and `coarse_step` (4) outside it, both end points included; `center`
+(default: the auto-calibrated BL for noise, and with `qsel` the data-counter turn-off found
+by the qinj_scurve bisection on [BL, 1020]); `acc_reads` (3); `windows` (3); `together`
+(false; true adds a pass with all listed pixels enabled at once, each at its own centre +
+offset, for the OR term in the trigger bit); `tag` ("", appended to the scan type). Every
+pixel is auto-calibrated first with FC idle. The pixel is set to `disDataReadout=0,
+disTrigPath=0, Bypass_THCal=1, CLKEn_THCal=1, BufEn_THCal=1, enable_TDC=1`, all TDC
+windows open. Per DAC: write the DAC; pulse `RSTn_THCal`; rising edge of
+`ScanStart_THCal`; wait 2 ms (the accumulator window is 32768 clocks, 0.8192 ms, ETROC2
+manual §3.1.3); read `ScanDone` and `ACC` `acc_reads` times (a point where `ScanDone` is not
+1 is flagged, the scan goes on); then, for noise, `windows` settled windows with FC idle
+(C2), FC qinj_l1a and `windows` settled windows (C3), FC idle again. With `qsel` the FC
+stays qinj_l1a for the whole scan, because the charge has to be injected while ACC and the
+trigger bits count, and the same windows give C2 and C3. About 8 s per point for noise
+with the defaults (2 x 3 windows of 1 s plus the settling after the DAC and FC changes),
+about 4 s with `qsel`; the default grid has 23 points.
+
 Every scan saves the Pixel Config fields it touches (DAC, QInjEn, QSel, L1Adelay,
 disDataReadout, disTrigPath, Bypass_THCal, enable_TDC, CLKEn_THCal, BufEn_THCal,
 RSTn_THCal, ScanStart_THCal, TH_offset and the TDC windows) before the auto-calibration and writes them back afterwards, also when the
@@ -182,6 +206,24 @@ Under `<output_path>/<YYYY-MM-DD>_Array_Test_Results/`:
   phase, chip, channel, row, col, QSel, charge, DAC, BL, NW, FC mode and all counters;
 - `<chip>_<ScanType>_<HHMMSS>_scan/scan.json`: parameters, per-pixel results, status
   (finished / aborted / failed) and the error.
+- `acc_scan` writes no `FPGA_Data.dat`, only the scan directory
+  (`<chip>_ACCScan_Noise_<HHMMSS>_scan` or `<chip>_ACCScan_QInj_<QSel>_<HHMMSS>_scan`).
+  `counters.csv` has one row per window, `phase` = `c2_idle`, `c3_qinj_l1a` (noise),
+  `c2c3_qinj_l1a` (qsel) or `center_search` (the turn-off bisection; its 7-column lines are
+  also in `center_search_R<r>_C<c>_QInj_<QSel>.dat`); rows of the `together` pass carry
+  `row`, `col`, `dac`, BL and NW as `;`-joined lists. `scan.json` holds per pixel the
+  auto-cal `baseline` and `noise_width`, `center`, and per point `dac`, `acc` (every read),
+  `scan_done`, `c1` (mean ACC / 32768), `c2` (trigger bits per window), `c2_duty` (mean
+  trigger bits / 40,000,001 clocks), `c3` (`data`, `header` per window), `c3_eff` (sum data /
+  sum header) and `flag`. Derived: `acc_bl`, `trig_bl`, `data_bl` (DAC where C1, C2, C3
+  cross 0.5, linear interpolation, the crossing nearest `center`), `acc_nw`, `trig_nw`,
+  `data_nw` (half the DAC distance between the 0.16 and 0.84 crossings),
+  `acc_nw_transition` (DAC codes with 0 < ACC < 32768, the manual's NW definition),
+  `acc_bl_vs_cal` = `acc_bl` - BL and, for noise, `positive_control` (pass when within
+  1 LSB: A1 check (a)). With `qsel` each curve is divided by its maximum (`*_plateau`)
+  before the crossings, since C1 and C2 only reach the pulse duty cycle. The `together`
+  entry lists per point the DACs, ACCs and C1 of every pixel and `c1_or_indep` = 1 -
+  prod(1 - C1).
 
 In RUN the satellite records every window of the selected channel to
 `<output_path>/<run_id>/counters_run.csv` and `FPGA_Data.dat` (DAC column -1). A

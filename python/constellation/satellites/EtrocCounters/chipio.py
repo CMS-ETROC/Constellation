@@ -10,6 +10,7 @@ read back and compared, so a failed I2C write stops the scan instead of being
 measured silently.
 """
 
+import time
 from typing import Protocol
 
 # Pixel Config fields a scan may change; they are saved before and restored after a scan.
@@ -56,6 +57,20 @@ DAC_MAX = 0x3FF
 POWER_MODES = ("high", "010", "101", "low")
 QSEL_MAX = 0x1F
 
+# In-pixel threshold-calibration accumulator (ETROC2 Reference Manual rev 0.60, section 3.1.3, pp. 18-21):
+# TH_Cal samples the discriminator output with the 40 MHz clock and sums the samples over a window of
+# 32768 clock periods (0.8192 ms), so ACC/32768 is the discriminator duty cycle at the applied threshold
+# (p. 18). "The users can measure the average of the discriminator output at the applied DAC input in the
+# bypass mode" (p. 19); Table 4 (p. 21) gives that configuration: Bypass = 1, CLKEn = 1, DAC = value,
+# RSTn active low, ScanStart a rising edge. ACC[15:0] is PixSTA6/PixSTA5 and ScanDone PixSTA1[0]
+# (Table 16, p. 64). The manual states that ScanDone rises at the end of the auto-calibration (p. 18);
+# it does not say so for the bypass-mode measurement, so a scan records ScanDone and flags a point
+# where it is not 1 instead of trusting the ACC value silently.
+ACC_WINDOW_CLK40 = 32768
+# wait after the ScanStart edge before reading ACC: more than the 0.8192 ms window
+ACC_WAIT_S = 0.002
+STATUS_BLOCK = ("ETROC2", "Pixel Status")
+
 
 class ChipWriteError(RuntimeError):
     """An I2C write did not read back as written."""
@@ -73,6 +88,11 @@ class ChipIO(Protocol):
 
     def auto_calibrate(self, row: int, col: int) -> tuple[int, int]:
         """Run the on-chip threshold calibration; return (baseline BL, noise width NW)."""
+
+    def measure_acc(self, row: int, col: int, reads: int, wait_s: float = ACC_WAIT_S) -> tuple[list[int], list[int]]:
+        """One bypass-mode ACC window at the current DAC: pulse RSTn_THCal, ScanStart_THCal rising edge,
+        wait `wait_s`, then read (ScanDone, ACC) `reads` times; returns (ACC values, ScanDone values).
+        The pixel must have Bypass_THCal = CLKEn_THCal = BufEn_THCal = 1."""
 
     def close(self) -> None:
         """Release the I2C adapter."""
@@ -125,6 +145,29 @@ class I2CGui2ChipIO:
         read = int(self.chip.get_decoded_value(*self.BLOCK, "DAC"))
         if read != dac:
             raise ChipWriteError(f"Pixel ({row},{col}) DAC written {dac}, read back {read}")
+
+    def _write_field(self, name: str, value: int) -> None:
+        """Write one Pixel Config field of the selected pixel and read it back."""
+        self.chip.set_decoded_value(*self.BLOCK, name, int(value))
+        self.chip.write_decoded_value(*self.BLOCK, name)
+        self.chip.read_decoded_value(*self.BLOCK, name)
+        read = int(self.chip.get_decoded_value(*self.BLOCK, name))
+        if read != int(value):
+            raise ChipWriteError(f"Pixel ({self.chip.row},{self.chip.col}) {name} written {value}, read back {read}")
+
+    def measure_acc(self, row: int, col: int, reads: int, wait_s: float = ACC_WAIT_S) -> tuple[list[int], list[int]]:
+        self._select(row, col)
+        # reset the accumulator, then a rising edge of ScanStart starts one 32768-clock window (manual Table 4)
+        for name, value in (("RSTn_THCal", 0), ("RSTn_THCal", 1), ("ScanStart_THCal", 0), ("ScanStart_THCal", 1)):
+            self._write_field(name, value)
+        time.sleep(wait_s)
+        acc, done = [], []
+        for _ in range(reads):
+            self.chip.read_decoded_value(*STATUS_BLOCK, "ScanDone")
+            done.append(int(self.chip.get_decoded_value(*STATUS_BLOCK, "ScanDone")))
+            self.chip.read_decoded_value(*STATUS_BLOCK, "ACC")
+            acc.append(int(self.chip.get_decoded_value(*STATUS_BLOCK, "ACC")))
+        return acc, done
 
     def auto_calibrate(self, row: int, col: int) -> tuple[int, int]:
         bl, nw, _ = self.conn.auto_cal_single_pixel(self.chip_address, row, col)
