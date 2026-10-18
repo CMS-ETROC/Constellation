@@ -103,24 +103,29 @@ From the controller console:
 constellation.initialize(cfg)
 constellation.launch()
 constellation.EtrocCounters.One.read_counters()
-constellation.EtrocCounters.One.set_fc_mode("qinj_l1a")
-constellation.EtrocCounters.One.noise_scan({"pixels": [[0, 14]], "rel_min": -10, "rel_max": 20})
+constellation.EtrocCounters.One.set_fc_mode(["qinj_l1a"])
+constellation.EtrocCounters.One.noise_scan([{"pixels": [[0, 14]], "rel_min": -10, "rel_max": 20}])
 constellation.EtrocCounters.One.get_scan_status()
 constellation.EtrocCounters.One.get_scan_result()
 ```
 
+A command payload is a list with one element per argument (`set_channel([1])`); a bare
+value is refused. Scan parameters can also be a JSON string, which is what MissionControl's
+command field passes on: `noise_scan(['{"pixels": [[0, 14]]}'])`.
+
 Scans run in a background thread (the controller times out a command after 5 s);
-poll `get_scan_status` and fetch `get_scan_result` at the end.
+poll `get_scan_status` and fetch `get_scan_result` at the end. `start` is refused while a
+scan runs.
 
 ## Commands
 
 | Command | Payload | States |
 |---|---|---|
 | `read_counters` | none | ORBIT, RUN |
-| `set_channel` | channel 0-3 | ORBIT |
-| `set_fc_mode` | `"idle"` (IDLE only), `"qinj_l1a"` (QInj at BX 5 and L1A at BX 509 of every orbit, about 11,223 per second) or `"custom <memo>"` (EtrocTransmitter memo words) | ORBIT |
-| `noise_scan` | dict, see below | ORBIT |
-| `qinj_scurve` | dict, see below | ORBIT |
+| `set_channel` | `[channel]`, 0-3 | ORBIT |
+| `set_fc_mode` | `"idle"` (IDLE only), `"qinj_l1a"` (QInj at BX 5 and L1A at BX 509 of every orbit, about 11,223 per second) or `"custom <memo>"` (EtrocTransmitter memo words; must contain `Start` and `Triggerbit`) | ORBIT |
+| `noise_scan` | dict or JSON string, see below | ORBIT |
+| `qinj_scurve` | dict or JSON string, see below | ORBIT |
 | `stop_scan` | none | any |
 | `get_scan_status`, `get_scan_result` | none | any |
 | `check_status_layout` | none | ORBIT |
@@ -136,11 +141,13 @@ until `settle_windows` windows have completed after the last channel or FC chang
 The pixel is set to `disDataReadout=1, QInjEn=0, disTrigPath=0, Bypass_THCal=1,
 enable_TDC=1`, all TDC windows open.
 
-`qinj_scurve` (FC set to qinj_l1a for the scan): `pixels` (required); `qsels` ([27]);
+`qinj_scurve` (auto-calibration of all pixels first with FC idle, then FC set to qinj_l1a
+for the scan): `pixels` (required); `qsels` ([27]);
 `method` "binary" (default) or "sweep"; `turn_on` / `turn_off` (true); `turnoff_counter`
 "data" (default) or "trigbit"; `turnoff_dac_max` (1020); for "sweep" `dac_min` /
 `dac_max` / `step` (BL-10 .. BL+150, 2); `tag`. The pixel is set to `disDataReadout=0,
-QInjEn=1, QSel, L1Adelay = l1a_delay, Bypass_THCal=1, enable_TDC=1`.
+QInjEn=1, QSel, L1Adelay = l1a_delay, Bypass_THCal=1, enable_TDC=1`. With an `l1a_delay`
+other than 0x1F5 the log warns: the qinj_l1a pattern puts the L1A 504 BX after the QInj.
 
 - Turn-on: bisection on [0, BL+3NW] for the lowest DAC with trigger bits > 0.
 - Turn-off: bisection on [BL, turnoff_dac_max] for the highest DAC whose counter is at
@@ -149,8 +156,8 @@ QInjEn=1, QSel, L1Adelay = l1a_delay, Bypass_THCal=1, enable_TDC=1`.
 - Both searches re-measure the result DAC last, so the last line of `FPGA_Data.dat` holds it.
 
 Every scan saves the Pixel Config fields it touches (DAC, QInjEn, QSel, L1Adelay,
-disDataReadout, disTrigPath, Bypass_THCal, enable_TDC, CLKEn_THCal, BufEn_THCal and the
-TDC windows) before the auto-calibration and writes them back afterwards, also when the
+disDataReadout, disTrigPath, Bypass_THCal, enable_TDC, CLKEn_THCal, BufEn_THCal,
+RSTn_THCal, ScanStart_THCal, TH_offset and the TDC windows) before the auto-calibration and writes them back afterwards, also when the
 scan fails or is stopped; the previous FC mode is restored as well. Every I2C write is
 read back.
 
@@ -175,17 +182,26 @@ Under `<output_path>/<YYYY-MM-DD>_Array_Test_Results/`:
   (finished / aborted / failed) and the error.
 
 In RUN the satellite records every window of the selected channel to
-`<output_path>/<run_id>/counters_run.csv` and `FPGA_Data.dat` (DAC column -1).
+`<output_path>/<run_id>/counters_run.csv` and `FPGA_Data.dat` (DAC column -1). A
+`missed_windows` column counts windows skipped between two reads; when no new window
+arrives within three windows plus 1 s (link lost, counters held at 0) a row
+with `stalled = 1` is written and the run continues. `run.json` in the same directory holds
+the run identifier, start/stop time, channel, FC mode, the effective configuration and the
+window/stall counts. EtrocCounters sends no data records, so it has no BOR/EOR.
 
 Metrics (1 s, ORBIT and RUN): `REFRESH`, `DATA_RATE`, `HEADER_RATE`, `TRIGBIT_RATE`,
-`COINCIDENCE_RATE`, `CHANNEL`.
+`CHANNEL` show the last completed window; `COINCIDENCE_RATE` is the firmware's combined
+trigger count, which ticks on its own timer and is not aligned with `refresh`. Metrics
+never talk to the board: in ORBIT a poller thread reads one window per second into a
+cache (paused during scans), in RUN the run loop fills it; a metric is skipped when the
+cache is older than three windows.
 
 ## Parameters
 
 | Parameter | Default | Description |
 |---|---|---|
 | `hostname`, `port` | `192.168.2.3`, `1024` | KC705 (IP 192.168.2.<DIP switch>) |
-| `connect_timeout`, `socket_timeout` | `5.0`, `5.0` | seconds; 0 = no I/O timeout |
+| `connect_timeout`, `socket_timeout` | `5.0`, `5.0` | seconds, both > 0 |
 | `channel` | `0` | channel shown at launch |
 | `fc_mode_on_launch` | `"idle"` | FC pattern programmed at launch |
 | `prescale_factor` | `2048` | Reg10 prescale for the FC memory writes |
@@ -196,7 +212,7 @@ Metrics (1 s, ORBIT and RUN): `REFRESH`, `DATA_RATE`, `HEADER_RATE`, `TRIGBIT_RA
 | `i2c_port` | `""` | USB-ISS port, e.g. `/dev/ttyACM0`; empty = counters only |
 | `chip_address`, `ws_address`, `chip_name` | `0x60`, `0`, `"ETROC2"` | the scanned chip |
 | `chip_setup` | `"none"` | `"basic"` = PLL/FC calibration, peripherals, all pixels off, PLL/FC again |
-| `power_mode` | `"high"` | for `chip_setup = "basic"` |
+| `power_mode` | `"high"` | for `chip_setup = "basic"`: `"high"`, `"010"`, `"101"` or `"low"` |
 | `l1a_delay` | `0x1F5` | pixel L1Adelay for QInj scans (the 2023-24 value 501) |
 | `firmware_window_s` | `1.0` | wait timing only (tests use a shorter simulated window); programs nothing |
 
@@ -210,15 +226,17 @@ An empty configuration is refused: the TOML section must be `[EtrocCounters.<nam
    the word addressing differs from the source and every counter would be misread.
 3. `read_counters()` twice, about 2 s apart: `refresh` grows by about 1 per second.
    If it stays at 0, the channel link is not aligned (check `led_bits`: synched, trig_synched).
-4. `set_fc_mode("qinj_l1a")`, wait until `settled`: `header` about 11,223 per window on an
-   aligned channel with the chip configured. `set_fc_mode("idle")`: `header` 0.
-5. `set_channel(1)` on an unused channel: `refresh` 0 and `led_bits.monitor_sel` = 1.
+4. `set_fc_mode(["qinj_l1a"])`, wait until `settled`: `header` about 11,223 per window on an
+   aligned channel with the chip configured. `set_fc_mode(["idle"])`: `header` 0.
+5. `set_channel([1])` on an unused channel: `refresh` 0 and `led_bits.monitor_sel` = 1.
    Back to the chip's channel.
 6. With I2C: `noise_scan` on one known-good pixel; the peak DAC should be within NW of BL.
 7. `qinj_scurve` on the same pixel with QSel 27 (and `"method": "sweep"` once to
    cross-check the bisection), compared with the 2023-24 numbers for that chip type.
 8. After each scan, check that the pixel registers are back (`get_scan_result`, log lines
    "Restored pixel ...").
+9. A short run (`start`, 30 s, `stop`): `counters_run.csv` has one row per second,
+   `missed_windows` 0, no `stalled` rows; `run.json` has the stop time.
 
 ## Tests
 
