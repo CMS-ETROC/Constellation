@@ -11,6 +11,9 @@ register values `timestamp` (Reg13), `counter_duration` (Reg7),
 
 All commands are allowed in ORBIT only: in RUN the TCP stream is busy with
 data-FIFO reads, and a register transaction in between would corrupt both.
+
+Payloads are lists, one element per argument (as MissionControl sends them):
+from a Python controller call `set_ledpage([2])`, `set_data_phase_channel_delay([5, 1])`.
 """
 
 from typing import Any
@@ -26,17 +29,17 @@ ORBIT = [SatelliteState.ORBIT]
 class KC705RegisterCommands:
     """CSCP commands to read and tune KC705 configuration registers."""
 
-    @cscp_requestable(ORBIT, unpack_list=False)
+    @cscp_requestable(ORBIT)
     def get_config_register(self, reg: int) -> tuple[str, Any, dict]:
         """Read one KC705 configuration register (0-31) as a 16-bit binary string."""
         return "FPGA is Ready", format(cmd_interpret.read_config_reg(self.connection_socket, reg), "016b"), {}
 
-    @cscp_requestable(ORBIT, unpack_list=False)
+    @cscp_requestable(ORBIT)
     def get_status_register(self, reg: int) -> tuple[str, Any, dict]:
         """Read one KC705 status word (0-10) of the page selected by Reg13[1:0]."""
         return "FPGA is Ready", format(cmd_interpret.read_status_reg(self.connection_socket, reg), "016b"), {}
 
-    @cscp_requestable(ORBIT, unpack_list=False)
+    @cscp_requestable(ORBIT)
     def set_data_phase_delay(self, delay: int) -> tuple[str, Any, dict]:
         """Set the data delay field Reg13[12:7] (0-63)."""
         data_delay = max(0, min(delay, 63))
@@ -60,7 +63,7 @@ class KC705RegisterCommands:
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "data_delays_23", self.data_delays_23)
         return "FPGA Reg 6 Set, Data Delay Set", f"0x{cmd_interpret.read_config_reg(self.connection_socket, 6):04x}", {}
 
-    @cscp_requestable(ORBIT, unpack_list=False)
+    @cscp_requestable(ORBIT)
     def set_fc_phase_delay(self, delay: int) -> tuple[str, Any, dict]:
         """Set the FC delay field Reg7[15:10] (0-63). Reg7 is not a counter window on SEU2025."""
         fc_delay = max(0, min(delay, 63))
@@ -95,7 +98,7 @@ class KC705RegisterCommands:
             {},
         )
 
-    @cscp_requestable(ORBIT, unpack_list=False)
+    @cscp_requestable(ORBIT)
     def set_fc_bit_delay(self, delay: int) -> tuple[str, Any, dict]:
         """Set the FC bit delay field Reg14[13:10] (0-15)."""
         bit_delay = max(0, min(delay, 15))
@@ -104,7 +107,7 @@ class KC705RegisterCommands:
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "polarity", self.polarity)
         return "FPGA Reg 14 Set, FC Bit Delay Set", f"0x{cmd_interpret.read_config_reg(self.connection_socket, 14):04x}", {}
 
-    @cscp_requestable(ORBIT, unpack_list=False)
+    @cscp_requestable(ORBIT)
     def set_ledpage(self, page: int) -> tuple[str, Any, dict]:
         """Set LED_Pages Reg13[4:2] (0-5). Pages 0-3 also select the channel shown by the counters."""
         ledpage = max(0, min(page, 5))
@@ -113,14 +116,14 @@ class KC705RegisterCommands:
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
         return "FPGA Reg 13 Set, Led Page Set", format(cmd_interpret.read_config_reg(self.connection_socket, 13), "016b"), {}
 
-    @cscp_requestable(ORBIT, unpack_list=False)
+    @cscp_requestable(ORBIT)
     def set_active_channel(self, mask: int) -> tuple[str, Any, dict]:
         """Write Reg15 (enableCh[3:0] and trigger options)."""
         self.active_channel = mask
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "active_channel", self.active_channel)
         return "FPGA Reg 15 Set, active_channel Set", format(cmd_interpret.read_config_reg(self.connection_socket, 15), "016b"), {}
 
-    @cscp_requestable(ORBIT, unpack_list=False)
+    @cscp_requestable(ORBIT)
     def set_fast_command_memo(self, memo: str) -> tuple[str, Any, dict]:
         """Program the FC memory from a memo string, e.g. "Start QInj L1A Triggerbit BCR"."""
         self._check_memo(memo)

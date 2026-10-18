@@ -35,7 +35,8 @@ if 'cls_trace' in _saved_attrs: setattr(_logger_cls, 'trace', _saved_attrs['cls_
 # =======================================================================
 
 class i2c_connection:
-    def __init__(self, port: str, chip_addresses: list, ws_addresses: list, chip_names: list, clock: int = 100):
+    def __init__(self, port: str, chip_addresses: list, ws_addresses: list, chip_names: list, clock: int = 100,
+                 logger: logging.Logger | None = None):
         self.chip_addresses = chip_addresses
         self.ws_addresses = ws_addresses
         self.chip_names = chip_names
@@ -48,12 +49,17 @@ class i2c_connection:
         # 2. Simplified Delay Tracking
         self.fc_delays = {addr: {'clk': 1, 'data': 1} for addr in chip_addresses}
 
-        # 3. Build YOUR specific logger manually
-        self.logger = logging.getLogger("I2C_Manager")
-        self.logger.setLevel(logging.INFO)
-        self.logger.propagate = False  # Prevents it from touching the global root
+        # 3. Logger: a child of the caller's logger (a satellite's records then reach its console
+        #    and CMDP handlers, once), or a standalone stdout logger for notebooks and scripts
+        if logger is not None:
+            self.logger = logger.getChild("I2C")
+            self.logger.propagate = True
+        else:
+            self.logger = logging.getLogger("I2C_Manager")
+            self.logger.setLevel(logging.INFO)
+            self.logger.propagate = False  # Prevents it from touching the global root
 
-        if not self.logger.handlers:
+        if logger is None and not self.logger.handlers:
             handler = logging.StreamHandler(sys.stdout)
             formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
             handler.setFormatter(formatter)
@@ -92,6 +98,15 @@ class i2c_connection:
             self._chips[addr] = i2c_gui2.ETROC2_Chip(addr, ws_addr, self.conn, self.i2c_logger)
 
         return self._chips[addr]
+
+    def close(self) -> None:
+        """Release the USB-ISS port (USB_ISS_Helper only closes it in __del__)."""
+        iss = getattr(self.conn, "_iss", None) if getattr(self, "conn", None) is not None else None
+        if iss is not None:
+            iss.close()
+            self.conn._iss = None
+        self._chips = {}
+        self.conn = None
 
     def get_chip(self, addr: int) -> i2c_gui2.ETROC2_Chip:
         """Public access to the cached chip object for `addr`."""

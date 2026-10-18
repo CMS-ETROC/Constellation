@@ -19,13 +19,17 @@ def user_keys(config: Configuration) -> list[str]:
 
 
 def get_typed(config: Configuration, key: str, default_value: Any) -> Any:
-    """Get `key` converted to the type of `default_value` (ints are accepted for float keys)."""
+    """Get `key` converted to the type of `default_value`.
+
+    Float keys accept integers (`socket_timeout = 60` as well as `60.0`); the value is
+    returned as float. All other types must match exactly.
+    """
     if isinstance(default_value, bool):
         return config.get_bool(key, default_value)
     if isinstance(default_value, int):
         return config.get_int(key, default_value)
     if isinstance(default_value, float):
-        return config.get_float(key, default_value)
+        return float(config.get_num(key, default_value))
     if isinstance(default_value, str):
         return config.get_str(key, default_value)
     if isinstance(default_value, list):
