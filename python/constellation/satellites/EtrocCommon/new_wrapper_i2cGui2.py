@@ -13,25 +13,60 @@ RED   = "\033[31m"
 RESET = '\033[0m'
 
 # =======================================================================
-# WORKAROUND: Prevent i2c_gui2 from crashing on Constellation's TRACE level
+# i2c_gui2 registers TRACE (8) and DETAILED_TRACE (5) at import with an addLoggingLevel that raises
+# when the name already exists, and Constellation already defines logging.TRACE (5) and
+# ConstellationLogger.trace. Removing those for the duration of the import (the former workaround)
+# broke every thread that logged at TRACE meanwhile: a controller's heartbeat checker or a
+# satellite's heartbeat sender died with "'ConstellationLogger' object has no attribute 'trace'".
+# Instead, i2c_gui2.functions is loaded first with an addLoggingLevel that only adds what is missing,
+# so nothing that exists is removed or renamed, and the package import then picks it up.
 # =======================================================================
-_saved_attrs = {}
-for attr in ['TRACE', 'trace']:
-    if hasattr(logging, attr):
-        _saved_attrs[attr] = getattr(logging, attr)
-        delattr(logging, attr)
+import importlib.util
+import os
 
-_logger_cls = logging.getLoggerClass()
-if hasattr(_logger_cls, 'trace'):
-    _saved_attrs['cls_trace'] = getattr(_logger_cls, 'trace')
-    delattr(_logger_cls, 'trace')
 
-import i2c_gui2
+def _add_missing_logging_level(levelName: str, levelNum: int, methodName: str | None = None) -> None:
+    """i2c_gui2's addLoggingLevel without the raise: existing names, numbers and methods win."""
+    methodName = methodName or levelName.lower()
+    if not hasattr(logging, levelName):
+        setattr(logging, levelName, levelNum)
+        if logging.getLevelName(levelNum).startswith("Level "):
+            logging.addLevelName(levelNum, levelName)
+    level = getattr(logging, levelName)
 
-# Restore Constellation's original TRACE settings for the framework
-if 'TRACE' in _saved_attrs: logging.TRACE = _saved_attrs['TRACE']
-if 'trace' in _saved_attrs: logging.trace = _saved_attrs['trace']
-if 'cls_trace' in _saved_attrs: setattr(_logger_cls, 'trace', _saved_attrs['cls_trace'])
+    def log_for_level(self, message, *args, **kwargs):
+        if self.isEnabledFor(level):
+            self._log(level, message, args, **kwargs)
+
+    def log_to_root(message, *args, **kwargs):
+        logging.log(level, message, *args, **kwargs)
+
+    # on the base class, so loggers of any class made before or after this import have it
+    if not hasattr(logging.getLoggerClass(), methodName) and not hasattr(logging.Logger, methodName):
+        setattr(logging.Logger, methodName, log_for_level)
+    if not hasattr(logging, methodName):
+        setattr(logging, methodName, log_to_root)
+
+
+def _import_i2c_gui2():
+    if "i2c_gui2" not in sys.modules and "i2c_gui2.functions" not in sys.modules:
+        spec = importlib.util.find_spec("i2c_gui2")  # locates the package without running it
+        locations = list(spec.submodule_search_locations or []) if spec else []
+        path = os.path.join(locations[0], "functions.py") if locations else ""
+        fspec = importlib.util.spec_from_file_location("i2c_gui2.functions", path) if os.path.isfile(path) else None
+        if fspec is not None and fspec.loader is not None:
+            functions = importlib.util.module_from_spec(fspec)
+            fspec.loader.exec_module(functions)
+            functions.addLoggingLevel = _add_missing_logging_level
+            sys.modules["i2c_gui2.functions"] = functions
+    import i2c_gui2 as module
+
+    if "i2c_gui2.functions" in sys.modules and not hasattr(module, "functions"):
+        module.functions = sys.modules["i2c_gui2.functions"]
+    return module
+
+
+i2c_gui2 = _import_i2c_gui2()
 # =======================================================================
 
 class i2c_connection:
