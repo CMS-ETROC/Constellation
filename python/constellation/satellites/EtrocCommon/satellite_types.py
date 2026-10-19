@@ -44,7 +44,7 @@ _KC705_KEYS = (
     "prescale_factor", "reset_counter", "socket_timeout", "timestamp", "triggerbit_delay",
 )
 CONFIG_KEYS = {
-    "EtrocTransmitter": _KC705_KEYS + ("drain_on_stop", "drain_timeout"),
+    "EtrocTransmitter": _KC705_KEYS + ("drain_on_stop", "drain_timeout", "post_start_sleep_s"),
     "EtrocReceiver": ("flush_interval", "keep_time", "output_path", "skip_fillers", "translate"),
     "EtrocWaveform": _KC705_KEYS + (
         "active_boards", "chip_addresses", "chip_names", "fc_grammar", "i2c_port", "max_events", "offset",

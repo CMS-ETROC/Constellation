@@ -170,6 +170,8 @@ def test_reconfigure_memo_reprograms_the_fast_commands(setup):
         ({"num_fifo_read": 70000}, ["num_fifo_read must be 1-65536"]),
         ({"active_channel": -1}, ["active_channel must be a 16-bit register value"]),
         ({"triggerbit_delay": 0x1FFFF}, ["triggerbit_delay must be a 16-bit register value"]),
+        ({"post_start_sleep_s": -0.1}, ["post_start_sleep_s must be >= 0 and <= 10.0 s"]),
+        ({"post_start_sleep_s": 11.0}, ["post_start_sleep_s must be >= 0 and <= 10.0 s"]),
         ({"_data": {"disable_transmission": False}}, ["framework sections (_data)", "re-initialize"]),
     ],
 )
@@ -185,6 +187,34 @@ def test_refused_reconfigure_leaves_the_satellite_in_orbit(setup, change, words)
     with fake.lock:
         assert fake.received[mark:] == []
     assert sat._config._dictionary["polarity"] == 0x4023
+
+
+def _sleep_after_start_pulse(sat, monkeypatch):
+    """The sleep do_starting takes right after the start_DAQ pulse."""
+    events = []
+    pulse = tx_module.cmd_interpret.write_pulse_reg_decoded
+
+    def logged_pulse(sock, key=""):
+        events.append(("pulse", key))
+        return pulse(sock, key)
+
+    monkeypatch.setattr(tx_module.cmd_interpret, "write_pulse_reg_decoded", logged_pulse)
+    monkeypatch.setattr(tx_module.time, "sleep", lambda s: events.append(("sleep", s)))
+    sat.do_starting("run_post_start_sleep")
+    sat._stop_daq(log_toggle=False)
+    i = events.index(("pulse", "start_DAQ"))
+    return next(v for kind, v in events[i + 1:] if kind == "sleep")
+
+
+def test_post_start_sleep_defaults_to_the_old_wait_and_is_reconfigurable(setup, monkeypatch):
+    sat, tx, _, _ = setup
+    assert sat.post_start_sleep_s == 0.1
+    assert _sleep_after_start_pulse(sat, monkeypatch) == 0.1
+    rep = call(tx, "reconfigure", {"post_start_sleep_s": 0.5})
+    assert rep.verb_type == OK, rep.verb_msg
+    wait_state(sat, SatelliteState.ORBIT)
+    assert sat._config._dictionary["post_start_sleep_s"] == 0.5
+    assert _sleep_after_start_pulse(sat, monkeypatch) == 0.5
 
 
 def test_do_reconfigure_names_a_key_that_needs_a_landing(setup):

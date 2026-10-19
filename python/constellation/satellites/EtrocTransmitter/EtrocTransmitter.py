@@ -63,17 +63,22 @@ class EtrocTransmitter(
         # (do_run returns at once and the FIFO words left are lost).
         "drain_on_stop": 1,
         "drain_timeout": 5.0,
+        # Wait after the start_DAQ pulse before the start transition returns (ETROC2v2: 0.1 s). Nobody
+        # reads the FIFO in that time, so hold_L1A may idle L1As at run start (bench A2c, 2026-10-19).
+        "post_start_sleep_s": 0.1,
     }
 
     # Keys `reconfigure` may change in ORBIT; the connection keys need a landing.
     RECONFIGURABLE_KEYS = (
         *KC705RegisterCommands.LAUNCH_REGISTERS,
         "prescale_factor", "fast_command_memo", "num_fifo_read", "clear_fifo", "reset_counter", "firmware",
-        "drain_on_stop", "drain_timeout",
+        "drain_on_stop", "drain_timeout", "post_start_sleep_s",
     )
 
     # upper bound of drain_timeout: the drain runs inside the stop transition
     DRAIN_TIMEOUT_MAX_S = 60.0
+    # upper bound of post_start_sleep_s: the sleep runs inside the start transition
+    POST_START_SLEEP_MAX_S = 10.0
 
     def configure_memo_FC(self, memo=None) -> None:
         """Program the FC memory from a memo string (grammar in EtrocCommon.fast_command)."""
@@ -166,7 +171,7 @@ class EtrocTransmitter(
         self._daq_started = True
         self._daq_start_unix = time.time()
         cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "start_DAQ")
-        time.sleep(0.1)
+        time.sleep(self.post_start_sleep_s)
         self._log_daq_toggle("after Start Pulse")
 
         return f"Run {run_identifier} Session Started"
@@ -328,6 +333,11 @@ class EtrocTransmitter(
         if "drain_timeout" in values and not 0 < values["drain_timeout"] <= self.DRAIN_TIMEOUT_MAX_S:
             raise ValueError(
                 f"drain_timeout must be > 0 and <= {self.DRAIN_TIMEOUT_MAX_S} s, got {values['drain_timeout']!r}"
+            )
+        if "post_start_sleep_s" in values and not 0 <= values["post_start_sleep_s"] <= self.POST_START_SLEEP_MAX_S:
+            raise ValueError(
+                f"post_start_sleep_s must be >= 0 and <= {self.POST_START_SLEEP_MAX_S} s, "
+                f"got {values['post_start_sleep_s']!r}"
             )
 
     def _apply_reconfigure(self, plan: dict[str, Any]) -> list[str]:

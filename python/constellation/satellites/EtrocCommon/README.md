@@ -164,6 +164,9 @@ loader imports only the files it was installed with, so a new module (e.g.
   `fc_idle_unix` (stamped before the IDLE fill, i.e. the end of the QInj/L1A playback), `daq_stop_unix`
   and `fast_command_memo`. The next start replays the memo
   (also with `clear_fifo = 0`). `drain_on_stop = 0` is the ETROC2v2 order.
+- EtrocTransmitter `post_start_sleep_s` (default 0.1, the ETROC2v2 value, 0-10 s, reconfigurable):
+  the wait after the start_DAQ pulse inside the start transition. No FIFO read happens in it, so a
+  full output FIFO can hold L1As back at run start; `daq_start_unix` is stamped before the pulse.
 - EtrocReceiver writes `receiver_stop_state.json` into the run directory at every stop:
   `in_event_at_stop` (the stream ended inside an event, i.e. the last event lost its
   trailer), bytes received, last file index, start/stop times.
@@ -193,7 +196,7 @@ loader imports only the files it was installed with, so a new module (e.g.
 
   | Type | Keys |
   |---|---|
-  | EtrocTransmitter | `active_channel`, `timestamp`, `triggerbit_delay`, `polarity`, `counter_duration`, `fc_delays`, `data_delays_01`, `data_delays_23`, `prescale_factor`, `fast_command_memo`, `num_fifo_read`, `clear_fifo`, `reset_counter`, `firmware`, `drain_on_stop`, `drain_timeout` |
+  | EtrocTransmitter | `active_channel`, `timestamp`, `triggerbit_delay`, `polarity`, `counter_duration`, `fc_delays`, `data_delays_01`, `data_delays_23`, `prescale_factor`, `fast_command_memo`, `num_fifo_read`, `clear_fifo`, `reset_counter`, `firmware`, `drain_on_stop`, `drain_timeout`, `post_start_sleep_s` |
   | EtrocWaveform | the EtrocTransmitter keys (without the drain keys), `ws_active_channel`, `active_boards`, `fc_grammar`, `max_events`, `ws_ready_timeout` |
   | EtrocReceiver | `translate`, `skip_fillers`, `keep_time`, `flush_interval` (takes effect at the next start) |
   | EtrocCounters | `channel`, `fc_mode_on_launch`, `prescale_factor`, `check_layout`, `settle_windows`, `l1a_delay`, the `kc705_registers` section (keys present at initialize); refused while a scan runs |
