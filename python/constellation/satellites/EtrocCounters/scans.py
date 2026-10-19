@@ -14,7 +14,8 @@ Outputs, under `<output_path>/<YYYY-MM-DD>_Array_Test_Results/`:
   (old directory names: <chip>_VRef_SCurve_NoiseOnly_Pixel_C<c>_R<r>,
   <chip>_VRef_SCurve_BinarySearch_TurnOn_Pixel_C<c>_R<r>,
   <chip>_VRef_SCurve_BinarySearch_TurnOff_Pixel_C<c>_R<r>_QInj_<qsel>);
-- one `<chip>_<scan>_<HHMMSS>_scan/` directory with `counters.csv` (every measured
+- one `<chip>_<scan>_<HHMMSS>_scan/` directory (`..._<HHMMSS>_rN_scan/` for a scan started in
+  the same second as the previous one) with `counters.csv` (every measured
   window with pixel, charge, channel, settings, timestamps) and `scan.json`
   (parameters, per-pixel results, status).
 """
@@ -240,9 +241,15 @@ class ScanEngine:
     @contextmanager
     def _scan_files(self, scan_type: str, params: dict[str, Any]) -> Iterator[dict[str, Any]]:
         stamp = time.strftime("%H%M%S")
-        scan_id = f"{self.chip_name}_{scan_type}_{stamp}"
+        base_id = scan_id = f"{self.chip_name}_{scan_type}_{stamp}"
         scan_dir = self._day_dir() / f"{scan_id}_scan"
-        scan_dir.mkdir(parents=True, exist_ok=True)
+        n = 1
+        while scan_dir.exists():
+            # a scan started in the same second as the previous one gets its own directory (_rN), never its files
+            n += 1
+            scan_id = f"{base_id}_r{n}"
+            scan_dir = self._day_dir() / f"{scan_id}_scan"
+        scan_dir.mkdir(parents=True)
         self._csv_file = open(scan_dir / "counters.csv", "w", newline="")
         self._csv_writer = csv.DictWriter(self._csv_file, fieldnames=CSV_COLUMNS)
         self._csv_writer.writeheader()

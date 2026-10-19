@@ -500,3 +500,16 @@ def test_together_sweep_stopped_mid_scan_restores_every_pixel_and_the_fc(tmp_pat
         rig.assert_clean()
     finally:
         rig.close()
+
+
+def test_scans_started_in_the_same_second_keep_separate_records(rig, monkeypatch):
+    from .. import scans
+
+    strftime = scans.time.strftime
+    monkeypatch.setattr(scans.time, "strftime", lambda fmt, *a: "120000" if fmt == "%H%M%S" else strftime(fmt, *a))
+    first = rig.engine.noise_scan({"pixels": [list(PIXEL)], "dac_min": BL, "dac_max": BL})
+    second = rig.engine.noise_scan({"pixels": [list(PIXEL)], "dac_min": BL - 2, "dac_max": BL - 2})
+    assert first["scan_dir"] != second["scan_dir"]
+    assert second["scan_id"].endswith("_120000_r2")
+    assert json.load(open(f"{first['scan_dir']}/scan.json"))["results"][0]["dac_min"] == BL
+    assert json.load(open(f"{second['scan_dir']}/scan.json"))["results"][0]["dac_min"] == BL - 2

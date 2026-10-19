@@ -221,6 +221,8 @@ Under `<output_path>/<YYYY-MM-DD>_Array_Test_Results/`:
   phase, chip, channel, row, col, QSel, charge, DAC, BL, NW, FC mode and all counters;
 - `<chip>_<ScanType>_<HHMMSS>_scan/scan.json`: parameters, per-pixel results, status
   (finished / aborted / failed) and the error.
+  A scan started in the same second as the previous one gets `<HHMMSS>_rN` (N = 2, 3, ...)
+  instead of sharing, and overwriting, its directory.
 - `acc_scan` writes no `FPGA_Data.dat`, only the scan directory
   (`<chip>_ACCScan_Noise_<HHMMSS>_scan` or `<chip>_ACCScan_QInj_<QSel>_<HHMMSS>_scan`).
   `counters.csv` has one row per window, `phase` = `c2_idle`, `c3_qinj_l1a` (noise),
