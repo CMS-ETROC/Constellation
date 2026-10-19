@@ -168,3 +168,22 @@ def test_stop_during_the_ws_ready_poll_is_prompt(make):
     wait_state(sat, SatelliteState.ORBIT, 5)
     assert time.monotonic() - t0 < 2.0
     assert call(tx, "get_ws_status").payload["events"] == 0
+
+
+def test_late_replies_are_discarded_after_a_failed_counter_read():
+    import logging
+    import socket
+    import types
+
+    a, b = socket.socketpair()
+    try:
+        a.settimeout(2.0)
+        b.sendall(b"\x00\x00\x12\x34" * 3)  # three late 32-bit replies
+        fake_self = types.SimpleNamespace(connection_socket=a, log=logging.getLogger("t"))
+        assert EtrocWaveform._discard_pending_replies(fake_self, quiet_s=0.2) == 12
+        assert a.gettimeout() == 2.0
+        b.sendall(b"\xab\xcd\xef\x01")  # the next reply is the next command's own
+        assert a.recv(4) == b"\xab\xcd\xef\x01"
+    finally:
+        a.close()
+        b.close()

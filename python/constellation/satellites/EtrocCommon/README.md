@@ -161,7 +161,8 @@ loader imports only the files it was installed with, so a new module (e.g.
   a read holds fillers only, at most `drain_timeout` seconds (default 5), and only then
   ends `do_run`; `do_stopping` sends stop_DAQ afterwards. The last event keeps its trailer.
   The EOR user tags carry `drain` (reads, words, seconds, clean, reason), `daq_start_unix`,
-  `fc_idle_unix`, `daq_stop_unix` and `fast_command_memo`. The next start replays the memo
+  `fc_idle_unix` (stamped before the IDLE fill, i.e. the end of the QInj/L1A playback), `daq_stop_unix`
+  and `fast_command_memo`. The next start replays the memo
   (also with `clear_fifo = 0`). `drain_on_stop = 0` is the ETROC2v2 order.
 - EtrocReceiver writes `receiver_stop_state.json` into the run directory at every stop:
   `in_event_at_stop` (the stream ended inside an event, i.e. the last event lost its
@@ -172,7 +173,8 @@ loader imports only the files it was installed with, so a new module (e.g.
   L1As). `fc_grammar = "legacy"` keeps the ETROC2v2 arithmetic (N+1 injections) for
   comparison. `get_fc_schedule` returns the BX addresses written and played;
   `read_fpga_counters` (ORBIT) returns the KC705 counters of the next 1 s window
-  (header = L1As answered per window).
+  (header = L1As answered per window); after a failed read the late replies are discarded
+  before Reg13 is restored, so the shared command stream stays in step.
 - EtrocWaveform run loop (R-KC7-SW-21): the WS-ready poll pauses 10 ms between reads and
   checks the stop request on every pass; `ws_ready_timeout` (default 5 s) bounds it. One
   file index per event, the same for every chip (`WS_rawData_<chip>_<event>.csv`);

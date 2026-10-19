@@ -234,10 +234,34 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         link.sock = self.connection_socket
         try:
             window = CounterReader(link).wait_windows(2)
+        except Exception:
+            # a reply that arrives after a timeout would answer the next command on this shared stream
+            self._discard_pending_replies()
+            raise
         finally:
             cmd_interpret.write_config_reg_decoded(self.connection_socket, "timestamp", self.timestamp)
         d = window.to_dict()
         return f"header {d['header']}, data {d['data']}, trigbit {d['trigbit']} (refresh {d['refresh']})", d, {}
+
+    def _discard_pending_replies(self, quiet_s: float = 0.5) -> int:
+        """Read and drop whatever the board still sends, until it is quiet for quiet_s; returns the bytes dropped."""
+        sock = self.connection_socket
+        old = sock.gettimeout()
+        dropped = 0
+        try:
+            sock.settimeout(quiet_s)
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                dropped += len(chunk)
+        except (TimeoutError, OSError):
+            pass
+        finally:
+            sock.settimeout(old)
+        if dropped:
+            self.log.warning(f"Dropped {dropped} bytes of late replies after a failed counter read")
+        return dropped
 
     @cscp_requestable()
     def get_ws_status(self) -> tuple[str, Any, dict]:

@@ -239,9 +239,11 @@ class EtrocTransmitter(
         never completes raises as in do_run (socket_timeout). Records the outcome in self._drain_stats.
         """
         t0 = time.monotonic()
+        # stamped before the IDLE fill: the first fc_init of the fill already overwrites the QInj/L1A
+        # slots, so this bounds the last L1A (the EOR's FC playback time ends here)
+        self._fc_idle_unix = time.time()
         self.configure_memo_FC(memo="Triggerbit")
         self._fc_idled_by_drain = True
-        self._fc_idle_unix = time.time()
         deadline = t0 + self.drain_timeout
         reads = words = 0
         clean = False
