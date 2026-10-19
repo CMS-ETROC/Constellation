@@ -506,6 +506,7 @@ def test_failed_refresh_read_at_a_change_does_not_report_settled():
         ("idle", "must contain QInj and L1A"),
         ("custom Start QInj Triggerbit", "must contain QInj and L1A"),
         ("custom Start QInj L1A", "lacks ['Triggerbit']"),
+        ("custom Start QInj L1A", "needs allow_unpaired_memo = true"),
         ("custom QInj L1A Triggerbit", "lacks ['Start']"),
         ("custom Start QInj L1A Triggerbit l1a_offset=4000", "outside the orbit"),
         ("fast", "FC mode must be one of"),

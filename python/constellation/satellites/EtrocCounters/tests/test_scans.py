@@ -440,6 +440,30 @@ def test_qinj_sweep_with_trigger_path_off_reads_hits_without_trigger_bits(rig):
     rig.assert_clean()
 
 
+def test_fc_pattern_failing_while_programmed_is_reprogrammed(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        calls = []
+        working = rig.set_fc_mode
+
+        def flaky(mode):
+            calls.append(mode)
+            if mode.startswith("custom"):
+                rig.link.configure_fc(mode.removeprefix("custom "))  # the memory is rewritten ...
+                raise OSError("timed out while programming the FC memory")  # ... but the change fails
+            working(mode)
+
+        rig.engine.set_fc_mode = flaky
+        with pytest.raises(OSError):
+            rig.engine.qinj_scurve({"pixels": [list(PIXEL)], "qsels": [9], "method": "sweep",
+                                    "dac_min": BL + 20, "dac_max": BL + 20,
+                                    "fc_mode": "custom Start QInj L1A Triggerbit multiple=2"})
+        assert calls == ["custom Start QInj L1A Triggerbit multiple=2", "idle"]
+        rig.assert_clean()
+    finally:
+        rig.close()
+
+
 def test_l1a_offset_and_l1a_delay_move_the_readout_window_together(tmp_path):
     rig = Rig(tmp_path, latency_offset=3)  # in time when L1A - QInj = L1Adelay + 3, i.e. 504 = 501 + 3
     try:

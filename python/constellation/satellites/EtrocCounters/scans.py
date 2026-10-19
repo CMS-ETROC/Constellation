@@ -313,17 +313,29 @@ class ScanEngine:
 
     @contextmanager
     def _fc_session(self, mode: str) -> Iterator[None]:
+        """Play `mode` inside the block and the previous pattern afterwards, whatever happens. A change that
+        fails while the FC memory is being written (its name not yet taken) is re-programmed as well."""
         previous = self.get_fc_mode()
-        if mode != previous:
-            self.set_fc_mode(mode)
+        changed = False
         try:
+            if mode != previous:
+                changed = True
+                self.set_fc_mode(mode)
             yield
         finally:
-            if self.get_fc_mode() != previous:
-                try:
-                    self.set_fc_mode(previous)
-                except Exception as e:
-                    self.log.critical(f"FAILED to restore fast-command mode '{previous}': {e}")
+            if changed or self.get_fc_mode() != previous:
+                self._restore_fc(previous)
+
+    def _restore_fc(self, previous: str) -> None:
+        try:
+            self.set_fc_mode(previous)
+            return
+        except Exception as e:
+            self.log.critical(f"FAILED to restore fast-command mode '{previous}': {e}; trying idle")
+        try:
+            self.set_fc_mode("idle")
+        except Exception as e:
+            self.log.critical(f"FAILED to set the fast commands idle: {e}")
 
     def _measure(self, row: int, col: int, dac: int, record: dict[str, Any], meta: dict[str, Any], dat) -> CounterWindow:
         self._check_stop()
@@ -687,10 +699,9 @@ class ScanEngine:
             csv_dac = ";".join(str(d) for d in dacs)
         if qsel is None:
             c2_windows = self._acc_windows(opt["windows"], row, col, csv_dac, record, {**meta, "phase": "c2_idle"})
-            self.set_fc_mode("qinj_l1a")
-            c3_windows = self._acc_windows(opt["windows"], row, col, csv_dac, record,
-                                           {**meta, "phase": "c3_qinj_l1a"})
-            self.set_fc_mode("idle")
+            with self._fc_session("qinj_l1a"):  # back to the idle of the enclosing session, also on errors
+                c3_windows = self._acc_windows(opt["windows"], row, col, csv_dac, record,
+                                               {**meta, "phase": "c3_qinj_l1a"})
         else:
             c2_windows = c3_windows = self._acc_windows(opt["windows"], row, col, csv_dac, record,
                                                         {**meta, "phase": "c2c3_qinj_l1a"})

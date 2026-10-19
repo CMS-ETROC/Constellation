@@ -666,6 +666,8 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
                 raise ValueError(
                     f"custom memo '{memo}' lacks {missing}: without 'Start' the FC playback is not started, "
                     f"without 'Triggerbit' the chip sends no trigger bits and trigbit stays 0"
+                    + (" (a memo without Triggerbit needs allow_unpaired_memo = true, measurement A5 only)"
+                       if missing == ["Triggerbit"] else "")
                 )
             return memo
         raise ValueError(f"FC mode must be one of {list(FC_MODES)} or 'custom <memo words>', got '{mode}'")
