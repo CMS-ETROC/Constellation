@@ -71,7 +71,7 @@ def parse_pixels(pixels: Any) -> list[tuple[int, int]]:
 NOISE_SCAN_KEYS = {"pixels", "rel_min", "rel_max", "step", "dac_min", "dac_max", "data_readout", "tag"}
 QINJ_SCURVE_KEYS = {
     "pixels", "qsels", "method", "turn_on", "turn_off", "turnoff_counter", "turnoff_dac_max",
-    "dac_min", "dac_max", "step", "tag",
+    "dac_min", "dac_max", "step", "tag", "fc_mode", "together", "trig_path",
 }
 ACC_SCAN_KEYS = {
     "pixels", "qsel", "together", "rel_min", "rel_max", "fine_range", "fine_step", "coarse_step", "center",
@@ -119,6 +119,18 @@ def validate_scan_params(kind: str, params: dict[str, Any]) -> None:
         raise ValueError("qinj_scurve: method must be 'binary' or 'sweep'")
     if params.get("turnoff_counter", "data") not in ("data", "trigbit"):
         raise ValueError("qinj_scurve: turnoff_counter must be 'data' or 'trigbit'")
+    if "fc_mode" in params and not (isinstance(params["fc_mode"], str) and params["fc_mode"].strip()):
+        raise ValueError("qinj_scurve: 'fc_mode' must be a non-empty string (an FC mode with QInj and L1A)")
+    for key in ("together", "trig_path"):
+        if key in params and not isinstance(params[key], bool):
+            raise ValueError(f"qinj_scurve: '{key}' must be true or false")
+    sweep = params.get("method", "binary") == "sweep"
+    if params.get("together", False) and not (sweep and "dac_min" in params and "dac_max" in params):
+        raise ValueError("qinj_scurve: 'together' needs method 'sweep' with absolute dac_min and dac_max")
+    if params.get("trig_path", True) is False and not sweep:
+        raise ValueError("qinj_scurve: 'trig_path': false needs method 'sweep' (the turn-on search uses the trigger bits)")
+    if sweep and params.get("dac_min", 0) > params.get("dac_max", DAC_MAX):
+        raise ValueError("qinj_scurve: dac_min > dac_max")
 
 
 def _validate_acc_params(params: dict[str, Any]) -> None:
@@ -403,7 +415,12 @@ class ScanEngine:
         method "binary" (default) or "sweep"; turn_on (True) and turn_off (True) for the
         binary search; turnoff_counter "data" (default, as pixel_turnoff_points) or
         "trigbit"; turnoff_dac_max (1020); dac_min/dac_max/step for "sweep" (default
-        BL-10 .. BL+150, step 2); tag ("").
+        BL-10 .. BL+150, step 2); tag ("");
+        fc_mode ("qinj_l1a"): the FC pattern during the injection (a custom memo with QInj and L1A, e.g.
+        "custom Start QInj L1A Triggerbit multiple=64" for the rate ladder or "... l1a_offset=K" for the
+        FC-to-L1A pairing); the auto-calibration still runs with idle FC and the previous pattern is
+        restored afterwards; together (False, sweep with absolute dac_min/dac_max only): all pixels
+        enabled at once at the same DAC; trig_path (True; False = disTrigPath 1, sweep only).
         """
         validate_scan_params("qinj_scurve", params)
         pixels = parse_pixels(params.get("pixels"))
@@ -423,6 +440,9 @@ class ScanEngine:
         do_off = bool(params.get("turn_off", True))
         turnoff_max = int(params.get("turnoff_dac_max", 1020))
         tag = str(params.get("tag", ""))
+        fc_mode = str(params.get("fc_mode", "qinj_l1a")).strip()
+        together = bool(params.get("together", False))
+        trig_path = bool(params.get("trig_path", True))
 
         if self.l1a_delay != QINJ_L1A_SPACING_DEFAULT_DELAY:
             self.log.warning(
@@ -438,12 +458,17 @@ class ScanEngine:
                     self._check_stop()
                     with self._pixel_session(row, col):
                         baselines[(row, col)] = self._baseline(row, col, autocal=True)
-            with self._fc_session("qinj_l1a"):
+            base_fields = {"disDataReadout": 0, "QInjEn": 1, "disTrigPath": 0 if trig_path else 1, "Bypass_THCal": 1,
+                           "enable_TDC": 1, "L1Adelay": self.l1a_delay, **OPEN_WINDOWS}
+            with self._fc_session(fc_mode):
+                if together:
+                    for qsel in qsels:
+                        record["results"].append(
+                            self._sweep_together(pixels, baselines, base_fields, qsel, params, counter, tag, record))
+                    return record
                 for row, col in pixels:
                     with self._pixel_session(row, col):
                         bl, nw = baselines[(row, col)]
-                        base_fields = {"disDataReadout": 0, "QInjEn": 1, "disTrigPath": 0, "Bypass_THCal": 1,
-                                       "enable_TDC": 1, "L1Adelay": self.l1a_delay, **OPEN_WINDOWS}
                         for qsel in qsels:
                             self.chip.write_pixel(row, col, {**base_fields, "QSel": qsel, "DAC": DAC_MAX})
                             meta = {"qsel": qsel, "charge_fC": qsel + 1, "baseline": bl, "noise_width": nw}
@@ -481,6 +506,43 @@ class ScanEngine:
                                             {**meta, "phase": "turn_off"}, dat)
                             record["results"].append(result)
         return record
+
+    def _sweep_together(self, pixels, baselines, base_fields, qsel, params, counter, tag, record) -> dict[str, Any]:
+        """All listed pixels injected and read out at once, every one at the same DAC of the sweep (measurement
+        plan A2: hits under the L1A rate ladder for 1, 4, 16 pixels). Rows and columns are written as 'r1;r2;...'."""
+        lo, hi, st = int(params["dac_min"]), int(params["dac_max"]), int(params.get("step", 2))
+        rows = ";".join(str(r) for r, _ in pixels)
+        cols = ";".join(str(c) for _, c in pixels)
+        meta = {"qsel": qsel, "charge_fC": qsel + 1, "phase": "sweep_together",
+                "baseline": ";".join(str(baselines[p][0]) for p in pixels),
+                "noise_width": ";".join(str(baselines[p][1]) for p in pixels)}
+        points = []
+        with ExitStack() as stack:
+            for row, col in pixels:
+                stack.enter_context(self._pixel_session(row, col))
+            for row, col in pixels:
+                self.chip.write_pixel(row, col, {**base_fields, "QSel": qsel, "DAC": DAC_MAX})
+            dat_path = self._pixel_file(
+                f"{self.chip_name}_VRef_SCurve_Sweep_Together_{len(pixels)}px_QInj_{qsel}{tag}")
+            record["pixel_files"].append(str(dat_path))
+            with open(dat_path, "w") as dat:
+                for dac in range(max(lo, 0), min(hi, DAC_MAX) + 1, st):
+                    self._check_stop()
+                    for row, col in pixels:
+                        self.chip.set_dac(row, col, dac)
+                    w = self._wait_windows(self.settle_windows)
+                    dat.write(fpga_data_line(w, dac))
+                    dat.flush()
+                    self._record_window(rows, cols, dac, w, record, meta)
+                    points.append((dac, w.trigbit, w.data, w.header))
+        result = {"pixels": [list(p) for p in pixels], "together": True, "n_pixels": len(pixels), "qsel": qsel,
+                  "charge_fC": qsel + 1, "baselines": [baselines[p][0] for p in pixels],
+                  "noise_widths": [baselines[p][1] for p in pixels], "method": "sweep"}
+        result.update(summarise_sweep(points, counter))
+        # the group's turn-off (counter >= header/2) is not a per-pixel efficiency; data / header / pixels is
+        result["hits_per_l1a_per_pixel"] = [
+            (data / h / len(pixels)) if h else None for _, _, data, h in points]
+        return result
 
     # ------------------------------------------------------------------ ACC scan
     def acc_scan(self, params: dict[str, Any]) -> dict[str, Any]:

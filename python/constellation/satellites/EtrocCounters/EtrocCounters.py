@@ -101,12 +101,17 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         "chip_setup": "none",
         "power_mode": "high",
         "l1a_delay": QINJ_L1A_SPACING_DEFAULT_DELAY,
+        # measurement plan A5 only: accept a custom memo without Triggerbit (R-KC7-SW-09 signature)
+        "allow_unpaired_memo": False,
     }
 
     # Keys `reconfigure` may change in ORBIT (not while a scan runs). The connection, the I2C
     # adapter and chip, the output directory and firmware_window_s (reader and poller timing,
     # built at launch) need a landing.
-    RECONFIGURABLE_KEYS = ("channel", "fc_mode_on_launch", "prescale_factor", "check_layout", "settle_windows", "l1a_delay")
+    RECONFIGURABLE_KEYS = (
+        "channel", "fc_mode_on_launch", "prescale_factor", "check_layout", "settle_windows", "l1a_delay",
+        "allow_unpaired_memo",
+    )
     RECONFIGURABLE_SECTIONS = ("kc705_registers",)
 
     def __init__(self, *args: Any, **kwargs: Any):
@@ -129,6 +134,7 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         self.firmware_window_s = 1.0
         self.socket_timeout = 5.0
         self.settle_windows = 2
+        self.allow_unpaired_memo = False
         super().__init__(*args, **kwargs)
 
     # ----------------------------------------------------------- FSM handlers
@@ -151,7 +157,8 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         if "prescale_factor" in values and values["prescale_factor"] not in PRESCALE_FACTORS:
             raise ValueError(f"prescale_factor must be one of {PRESCALE_FACTORS}, got {values['prescale_factor']}")
         if "fc_mode_on_launch" in values:
-            self._parse_fc_mode(values["fc_mode_on_launch"])
+            self._parse_fc_mode(
+                values["fc_mode_on_launch"], values.get("allow_unpaired_memo", getattr(self, "allow_unpaired_memo", False)))
         if "settle_windows" in values and values["settle_windows"] < 2:
             raise ValueError("settle_windows must be >= 2: the first window after a change can be partial")
         if "chip_setup" in values and values["chip_setup"] not in ("none", "basic"):
@@ -495,6 +502,10 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
                 f"KC705 SEU2025 firmware according to its notes, see README)"
                 if "prescale_factor" in plan else f"FC {self._fc_mode}"
             )
+        if "allow_unpaired_memo" in plan and not self.allow_unpaired_memo and not self._fc_mode_allowed(self._fc_mode):
+            # the playing pattern lacks Triggerbit and is no longer allowed: back to idle
+            self._apply_fc_mode("idle")
+            changes.append("FC idle (the playing memo lacks Triggerbit and allow_unpaired_memo is now false)")
         if self._engine is not None:
             self._engine.settle_windows = self.settle_windows
             self._engine.l1a_delay = self.l1a_delay
@@ -537,7 +548,9 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
 
     @cscp_requestable(ORBIT)
     def set_fc_mode(self, mode: str) -> tuple[str, Any, dict]:
-        """Fast commands: ["idle"], ["qinj_l1a"] (QInj + L1A once per orbit) or ["custom <memo>"] (with Start and Triggerbit)."""
+        """Fast commands: ["idle"], ["qinj_l1a"] (QInj + L1A once per orbit) or ["custom <memo>"] (with Start and Triggerbit;
+        Triggerbit may be left out only with allow_unpaired_memo = true). Memo words: Start, Triggerbit, BCR, QInj, L1A,
+        multiple=N, l1a_offset=K."""
         self._refuse_while_scanning()
         self._apply_fc_mode(mode)
         return f"Fast commands: {self._fc_mode}", self._fc_mode, {}
@@ -549,7 +562,8 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
 
     @cscp_requestable(ORBIT)
     def qinj_scurve(self, params: dict | str) -> tuple[str, Any, dict]:
-        """QInj S-curve edges in the background. Payload: [{"pixels": [[row, col]], "qsels": [27]}] or [JSON string]."""
+        """QInj S-curve edges in the background. Payload: [{"pixels": [[row, col]], "qsels": [27]}] or [JSON string];
+        optional "fc_mode" (a pattern with QInj and L1A), "together" and "trig_path" (sweep only)."""
         return self._start_scan("qinj_scurve", _scan_params(params))
 
     @cscp_requestable(ORBIT)
@@ -624,8 +638,15 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
         return None if w is None else w.channel
 
     # ---------------------------------------------------------------- helpers
-    def _parse_fc_mode(self, mode: str) -> str:
-        """Return the FC memo for a mode name; raises ValueError for anything else."""
+    def _parse_fc_mode(self, mode: str, allow_unpaired: bool | None = None) -> str:
+        """Return the FC memo for a mode name; raises ValueError for anything else.
+
+        A custom memo needs 'Start' and 'Triggerbit'. With allow_unpaired_memo (or `allow_unpaired`) a memo
+        without 'Triggerbit' is accepted with a warning: the firmware then expects frames without the trigger
+        bits the chip still inserts (R-KC7-SW-09), the signature measurement A5 records.
+        """
+        if not isinstance(mode, str):
+            raise ValueError(f"FC mode must be a string, got {type(mode).__name__}")
         mode = mode.strip()
         if mode in FC_MODES:
             return FC_MODES[mode]
@@ -634,6 +655,13 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
             fast_command.parse_memo(memo)
             words = memo.split()
             missing = [w for w in ("Start", "Triggerbit") if w not in words]
+            if allow_unpaired is None:
+                allow_unpaired = bool(getattr(self, "allow_unpaired_memo", False))
+            if missing == ["Triggerbit"] and allow_unpaired:
+                self.log.warning(
+                    f"custom memo '{memo}' lacks 'Triggerbit' (allowed by allow_unpaired_memo): firmware trigDataSize "
+                    f"no longer matches the chip's trigger bits; expect no frame alignment and zero counters")
+                return memo
             if missing:
                 raise ValueError(
                     f"custom memo '{memo}' lacks {missing}: without 'Start' the FC playback is not started, "
@@ -641,6 +669,20 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
                 )
             return memo
         raise ValueError(f"FC mode must be one of {list(FC_MODES)} or 'custom <memo words>', got '{mode}'")
+
+    def _fc_mode_allowed(self, mode: str) -> bool:
+        try:
+            self._parse_fc_mode(mode, allow_unpaired=self.allow_unpaired_memo)
+        except ValueError:
+            return False
+        return True
+
+    def _check_scan_fc_mode(self, mode: Any) -> None:
+        """A scan's fc_mode must parse and must inject charge and send L1As (the turn-off criterion uses the headers)."""
+        memo = self._parse_fc_mode(mode)
+        flags = fast_command.parse_memo(memo)
+        if not (flags["QInj"] and flags["L1A"]):
+            raise ValueError(f"scan fc_mode '{mode}' must contain QInj and L1A (memo '{memo}')")
 
     def _apply_fc_mode(self, mode: str) -> None:
         memo = self._parse_fc_mode(mode)
@@ -733,6 +775,8 @@ class EtrocCounters(EtrocReconfigure, EtrocLifecycle, Satellite, version=ETROC_S
             raise RuntimeError("Scans need the chip: set i2c_port (and chip_address) in the configuration")
         self._refuse_while_scanning()
         validate_scan_params(kind, params)
+        if "fc_mode" in params:
+            self._check_scan_fc_mode(params["fc_mode"])
         self._scan_result = None
         engine = self._engine
         engine.stop_event.clear()

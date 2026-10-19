@@ -34,11 +34,15 @@ def concat(fields: list[tuple[int, int]]) -> int:
     return value
 
 
-def pixel_counts(fields: dict[str, int], bl: int, nw: int, injections: int, headers: int) -> tuple[int, int]:
+def pixel_counts(
+    fields: dict[str, int], bl: int, nw: int, injections: int, headers: int, l1a_matched: int | None = None
+) -> tuple[int, int]:
     """(trigger bits, data hits) of one pixel in one 1 s window.
 
     Noise: Gaussian in DAC around BL with sigma NW/2 (peak NOISE_PEAK per window).
     QInj: every injection fires while BL - NW <= DAC <= BL + GAIN * (QSel + 1).
+    l1a_matched (latency model only): injections per window whose L1A arrives at the pixel's L1Adelay;
+    only those are read out as data.
     """
     if not fields["Bypass_THCal"]:
         return 0, 0
@@ -49,7 +53,8 @@ def pixel_counts(fields: dict[str, int], bl: int, nw: int, injections: int, head
     if fields["QInjEn"] and bl - nw <= dac <= bl + GAIN_DAC_PER_FC * (fields["QSel"] + 1):
         fired = injections
     trig = 0 if fields["disTrigPath"] else noise + fired
-    data = 0 if fields["disDataReadout"] or headers == 0 else fired
+    readable = fired if l1a_matched is None or not fired else l1a_matched
+    data = 0 if fields["disDataReadout"] or headers == 0 else readable
     return trig, data
 
 
@@ -208,7 +213,8 @@ class FakeChip:
     def close(self):
         self.closed = True
 
-    def counts(self, injections: int, headers: int) -> tuple[int, int]:
+    def counts(self, injections: int, headers: int, matched=None) -> tuple[int, int]:
+        """Sum over the matrix; `matched(L1Adelay)` (latency model) gives the injections whose L1A comes in time."""
         trig = data = 0
         with self.lock:
             for p, f in self.pixels.items():
@@ -216,7 +222,8 @@ class FakeChip:
                 if self.level_model:
                     t, d = level_counts(f, bl, nw, headers)
                 else:
-                    t, d = pixel_counts(f, bl, nw, injections, headers)
+                    in_time = matched(f["L1Adelay"]) if matched is not None and f["QInjEn"] else None
+                    t, d = pixel_counts(f, bl, nw, injections, headers, in_time)
                 trig += t
                 data += d
         return trig, data
@@ -234,12 +241,24 @@ class FakeKC705:
         reg13: int = 0x1F80,
         reversed_words: bool = False,
         l1a_reaches_chip: bool = True,
+        latency_offset: int | None = None,
+        trigdatasize_model: bool = False,
     ):
+        """latency_offset (None: off): a hit is read out only when its L1A comes L1Adelay + latency_offset BX
+        after its QInj (a one-BX window; the bench pairing is 504 = 501 + 3).
+        trigdatasize_model: a pattern programmed without the Triggerbit format bits (Reg12[7:6] = 0) leaves the
+        frames unaligned: header, data and trigger bits read 0 while refresh still counts. That is the expectation
+        of measurement plan A5, modelled to exercise the code that records it, not a statement about the firmware.
+        """
         self.chip = chip
         self.window_s = window_s
         self.aligned_channels = set(aligned_channels)
         self.reversed_words = reversed_words
         self.l1a_reaches_chip = l1a_reaches_chip
+        self.latency_offset = latency_offset
+        self.trigdatasize_model = trigdatasize_model
+        self._fill_tds = 1
+        self.pattern_tds = 1
         self.config = [0] * 64
         self.config[8] = reg8
         self.config[13] = reg13
@@ -313,7 +332,22 @@ class FakeKC705:
 
     def _counts(self) -> dict[str, int]:
         injections, headers = self._rates()
-        trig, data = self.chip.counts(injections, headers) if self.chip is not None else (0, 0)
+        if self.trigdatasize_model and self.pattern and self.pattern_tds == 0:
+            return dict(data=0, header=0, trig=0, combine=0)
+        matched = None
+        if self.latency_offset is not None and self.pattern and headers:
+            pattern, n = self.pattern, len(self.pattern)
+            orbits = CLK40_PER_WINDOW / n
+            qinj = [i for i, c in enumerate(pattern) if c == FC_QINJ]
+            cache: dict[int, int] = {}
+
+            def matched(delay: int) -> int:
+                if delay not in cache:
+                    k = sum(1 for q in qinj if pattern[(q + delay + self.latency_offset) % n] == FC_L1A)
+                    cache[delay] = int(k * orbits)
+                return cache[delay]
+
+        trig, data = self.chip.counts(injections, headers, matched) if self.chip is not None else (0, 0)
         return dict(data=data, header=headers, trig=trig, combine=trig)
 
     def _state_key(self):
@@ -459,8 +493,10 @@ class FakeKC705:
             lo, hi = self.config[10] & 0xFFF, self.config[9] & 0xFFF
             for a in range(lo, hi + 1):
                 self.memory[a] = self.config[12] & 0xF
+            self._fill_tds = (self.config[12] >> 6) & 0b11  # trigDataSize of the fill
         if bits & 0x0004:  # fc_signal_start: play memory[0 .. Reg11]
             self.pattern = list(self.memory[: self.config[11] + 1])
+            self.pattern_tds = self._fill_tds
             self.fc_version += 1
         if bits & 0x0200:  # start_DAQ
             self.daq_running = True

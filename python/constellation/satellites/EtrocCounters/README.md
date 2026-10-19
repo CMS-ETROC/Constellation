@@ -123,7 +123,7 @@ scan runs.
 |---|---|---|
 | `read_counters` | none | ORBIT, RUN |
 | `set_channel` | `[channel]`, 0-3 | ORBIT |
-| `set_fc_mode` | `"idle"` (IDLE only), `"qinj_l1a"` (QInj at BX 5 and L1A at BX 509 of every orbit, about 11,223 per second) or `"custom <memo>"` (EtrocTransmitter memo words; must contain `Start` and `Triggerbit`) | ORBIT |
+| `set_fc_mode` | `"idle"` (IDLE only), `"qinj_l1a"` (QInj at BX 5 and L1A at BX 509 of every orbit, about 11,223 per second) or `"custom <memo>"` (EtrocTransmitter memo words, plus `l1a_offset=K`; must contain `Start` and `Triggerbit`, the latter optional only with `allow_unpaired_memo = true`) | ORBIT |
 | `noise_scan` | dict or JSON string, see below | ORBIT |
 | `qinj_scurve` | dict or JSON string, see below | ORBIT |
 | `acc_scan` | dict or JSON string, see below | ORBIT |
@@ -151,6 +151,21 @@ for the scan): `pixels` (required); `qsels` ([27]);
 `dac_max` / `step` (BL-10 .. BL+150, 2); `tag`. The pixel is set to `disDataReadout=0,
 QInjEn=1, QSel, L1Adelay = l1a_delay, Bypass_THCal=1, enable_TDC=1`. With an `l1a_delay`
 other than 0x1F5 the log warns: the qinj_l1a pattern puts the L1A 504 BX after the QInj.
+Optional, for the measurement plan items A2, A3 and A5 (`notes/measurement-plan-2026-10.md`
+of the ETROC-DAQ workspace):
+- `fc_mode` (`"qinj_l1a"`): the FC pattern while charge is injected, any mode `set_fc_mode`
+  accepts that contains `QInj` and `L1A` (checked before the scan starts), e.g.
+  `"custom Start QInj L1A Triggerbit multiple=64"` (64 QInj + L1A pairs per orbit, the A2 rate
+  ladder) or `"custom Start QInj L1A Triggerbit l1a_offset=-3"` (every L1A 3 BX earlier, 501 BX
+  after its QInj: the A3 reverse scan at fixed L1Adelay). The auto-calibration still runs with
+  FC idle; the previous pattern is restored at the end, also on errors.
+- `together` (false; sweep with absolute `dac_min` / `dac_max` only): all listed pixels
+  injected and read out at once, every one at the same DAC of the sweep; one result for the
+  group with `hits_per_l1a_per_pixel` = data / header / pixels per point (counters.csv rows
+  carry `row` / `col` as `r1;r2;...`).
+- `trig_path` (true; false = `disTrigPath=1`, sweep only): the pixel's hits are read out with
+  its trigger path off (A5: headers and data, no trigger bits). The pixel registers are
+  restored at the end as for every scan, so no pixel is left injecting with its trigger path off.
 
 - Turn-on: bisection on [0, BL+3NW] for the lowest DAC with trigger bits > 0.
 - Turn-off: bisection on [BL, turnoff_dac_max] for the highest DAC whose counter is at
@@ -258,6 +273,7 @@ cache is older than three windows.
 | `chip_setup` | `"none"` | `"basic"` = PLL/FC calibration, peripherals, all pixels off, PLL/FC again |
 | `power_mode` | `"high"` | for `chip_setup = "basic"`: `"high"`, `"010"`, `"101"` or `"low"` |
 | `l1a_delay` | `0x1F5` | pixel L1Adelay for QInj scans (the 2023-24 value 501) |
+| `allow_unpaired_memo` | `false` | accept a custom memo without `Triggerbit` (with a warning): the firmware's trigDataSize then no longer matches the chip's trigger bits (R-KC7-SW-09). Only for measuring that signature (plan A5); withdrawing it by `reconfigure` idles such a pattern |
 | `firmware_window_s` | `1.0` | wait timing only (tests use a shorter simulated window); programs nothing |
 
 An empty configuration is refused, and so is one that holds none of `output_path`,
@@ -267,7 +283,7 @@ error names the expected section. `python -m constellation.satellites.EtrocCommo
 file.toml` checks a file before it is loaded (see `EtrocCommon/README.md`).
 
 In ORBIT, `reconfigure` changes `channel`, `fc_mode_on_launch`, `prescale_factor`,
-`check_layout`, `settle_windows`, `l1a_delay` and the `kc705_registers` keys set at
+`check_layout`, `settle_windows`, `l1a_delay`, `allow_unpaired_memo` and the `kc705_registers` keys set at
 initialize, without a landing (refused while a scan runs). Other keys are refused with
 "land and re-initialize to change it" and the satellite stays in ORBIT. On Ctrl-C the
 satellite stops the run or scan (waiting for the pixel-register restore; a further Ctrl-C

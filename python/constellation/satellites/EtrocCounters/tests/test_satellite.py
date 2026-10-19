@@ -497,3 +497,81 @@ def test_failed_refresh_read_at_a_change_does_not_report_settled():
     assert sat._settle_ref is None
     window = lambda refresh: types.SimpleNamespace(refresh=refresh)
     assert [sat._is_settled(window(r)) for r in (100, 101, 102)] == [False, False, True]
+
+
+# ---------------------------------------------------- scan fc_mode and allow_unpaired_memo (plan A2, A3, A5)
+@pytest.mark.parametrize(
+    "fc_mode, word",
+    [
+        ("idle", "must contain QInj and L1A"),
+        ("custom Start QInj Triggerbit", "must contain QInj and L1A"),
+        ("custom Start QInj L1A", "lacks ['Triggerbit']"),
+        ("custom QInj L1A Triggerbit", "lacks ['Start']"),
+        ("custom Start QInj L1A Triggerbit l1a_offset=4000", "outside the orbit"),
+        ("fast", "FC mode must be one of"),
+    ],
+)
+def test_scan_fc_mode_is_refused_before_the_scan_starts(setup, fc_mode, word):
+    sat, tx, fake, chip, config = setup
+    launch(sat, tx, config)
+    rep = call(tx, "qinj_scurve", [{"pixels": [list(PIXEL)], "method": "sweep", "dac_min": 500, "dac_max": 500,
+                                    "fc_mode": fc_mode}])
+    assert rep.verb_type != OK
+    assert word in rep.verb_msg, rep.verb_msg
+    assert call(tx, "get_scan_status").verb_msg == "idle"
+
+
+def test_rate_pattern_together_scan_over_cscp_restores_pixels_and_fc(setup):
+    sat, tx, fake, chip, config = setup
+    other = (2, 6)
+    chip.baselines[other] = (482, 4)
+    initial = chip.snapshot()
+    launch(sat, tx, config)
+    rep = call(tx, "qinj_scurve", [{"pixels": [list(PIXEL), list(other)], "qsels": [9], "method": "sweep",
+                                    "dac_min": 505, "dac_max": 505, "together": True,
+                                    "fc_mode": "custom Start QInj L1A Triggerbit multiple=3"}])
+    assert rep.verb_type == OK, rep.verb_msg
+    result = wait_scan_done(tx)
+    assert result["status"] == "finished", result
+    (res,) = result["results"]
+    assert res["hits_per_l1a_per_pixel"] == [1.0]
+    assert chip.snapshot() == initial
+    assert call(tx, "read_counters").payload["fc_mode"] == "idle"
+    assert no_qinj_playing(fake)
+
+
+def test_unpaired_memo_needs_the_permission_and_loses_it_cleanly(setup):
+    sat, tx, fake, chip, config = setup
+    launch(sat, tx, config)
+    assert call(tx, "set_fc_mode", ["custom Start QInj L1A"]).verb_type != OK
+    assert call(tx, "reconfigure", {"allow_unpaired_memo": True}).verb_type == OK
+    wait_state(sat, SatelliteState.ORBIT)
+    mark = len(fake.received)
+    rep = call(tx, "set_fc_mode", ["custom Start QInj L1A"])
+    assert rep.verb_type == OK, rep.verb_msg
+    sat._link.read_config(8)  # round trip: every write before it has been handled
+    reg12 = [v for kind, a, v in fake.received[mark:] if kind == "write_config" and a == 12]
+    assert reg12 and all((v >> 6) & 0b11 == 0 for v in reg12)  # trigDataSize 00: the A5 condition
+    assert call(tx, "set_fc_mode", ["custom QInj L1A"]).verb_type != OK  # Start is still required
+    # withdrawing the permission idles the playing unpaired pattern
+    rep = call(tx, "reconfigure", {"allow_unpaired_memo": False})
+    assert rep.verb_type == OK, rep.verb_msg
+    wait_state(sat, SatelliteState.ORBIT)
+    assert call(tx, "read_counters").payload["fc_mode"] == "idle"
+    assert no_qinj_playing(fake)
+    assert call(tx, "set_fc_mode", ["custom Start QInj L1A"]).verb_type != OK
+
+
+def test_unpaired_scan_with_the_permission_restores_a_paired_pattern(setup):
+    sat, tx, fake, chip, config = setup
+    fake.trigdatasize_model = True
+    initial = chip.snapshot()
+    launch(sat, tx, {**config, "allow_unpaired_memo": True})
+    rep = call(tx, "qinj_scurve", [{"pixels": [list(PIXEL)], "qsels": [9], "method": "sweep", "dac_min": 500,
+                                    "dac_max": 500, "fc_mode": "custom Start QInj L1A"}])
+    assert rep.verb_type == OK, rep.verb_msg
+    result = wait_scan_done(tx)
+    assert result["status"] == "finished", result
+    assert chip.snapshot() == initial
+    assert call(tx, "read_counters").payload["fc_mode"] == "idle"
+    assert fake.pattern_tds == 1  # the restored idle pattern carries the Triggerbit format again

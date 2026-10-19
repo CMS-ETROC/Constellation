@@ -152,7 +152,10 @@ loader imports only the files it was installed with, so a new module (e.g.
   50,000 lines also when only fillers arrive. For quiet runs set `skip_fillers = 1` so the
   files hold events; for high rates use `translate = 0` (raw `.bin`, translated offline),
   since the translation runs in Python per word.
-- FC memos are validated: unknown words are rejected instead of ignored.
+- FC memos are validated: unknown words are rejected instead of ignored. Besides `Start`,
+  `Triggerbit`, `BCR`, `QInj`, `L1A` and `multiple=N`, the word `l1a_offset=K` (K may be negative)
+  places every L1A 504 + K BX after its QInj instead of 504; it needs `QInj` and `L1A`, and a
+  placement outside the orbit or on another command's address is refused.
 - `reconfigure` (ORBIT only) takes a dictionary of keys and applies them through the
   launch code: register keys are written and read back (the reply lists e.g.
   `polarity = 0x4123 (Reg14 read back 0x4123)`), a new `fast_command_memo` or

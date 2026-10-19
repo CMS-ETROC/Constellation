@@ -23,9 +23,10 @@ PIXEL = (3, 7)
 class Rig:
     """Fake board + chip + engine, with the FC mode handled like the satellite does."""
 
-    def __init__(self, tmp_path, fail_on_set_dac_call=None, l1a_reaches_chip=True):
+    def __init__(self, tmp_path, fail_on_set_dac_call=None, l1a_reaches_chip=True, latency_offset=None):
         self.chip = FakeChip({PIXEL: (BL, NW)}, fail_on_set_dac_call=fail_on_set_dac_call)
-        self.fake = FakeKC705(chip=self.chip, window_s=WINDOW, l1a_reaches_chip=l1a_reaches_chip).start()
+        self.fake = FakeKC705(chip=self.chip, window_s=WINDOW, l1a_reaches_chip=l1a_reaches_chip,
+                              latency_offset=latency_offset).start()
         self.link = KC705Link("127.0.0.1", self.fake.port, 2.0, 2.0)
         self.link.open()
         self.reader = CounterReader(self.link, window_s=WINDOW, poll_s=WINDOW / 5)
@@ -46,7 +47,8 @@ class Rig:
         self.initial = self.chip.snapshot()
 
     def set_fc_mode(self, mode):
-        self.link.configure_fc(FC_MODES[mode])
+        # named modes, or "custom <memo>" as the satellite passes them
+        self.link.configure_fc(FC_MODES[mode] if mode in FC_MODES else mode.removeprefix("custom "))
         self.fc_mode = mode
 
     def close(self):
@@ -380,3 +382,121 @@ def test_level_crossing_interpolates_nearest_the_centre():
     peak = [(0, 0.0), (1, 1.0), (2, 0.0)]
     assert level_crossing(peak, 0.5, 1.8) == pytest.approx(1.5)
     assert level_crossing([(0, 0.1), (1, 0.2)], 0.5, 0) is None
+
+
+# ------------------------------------------------- qinj_scurve fc_mode / together / trig_path (plan A2, A3, A5)
+ORBITS = 40_000_001 / 3564
+
+
+def test_qinj_sweep_under_a_rate_pattern_counts_n_hits_per_orbit(rig):
+    mode = "custom Start QInj L1A Triggerbit multiple=4"
+    record = rig.engine.qinj_scurve({"pixels": [list(PIXEL)], "qsels": [9], "method": "sweep",
+                                     "dac_min": BL + 20, "dac_max": BL + 22, "step": 1, "fc_mode": mode})
+    points = record["results"][0]["points"]
+    assert [p["header"] for p in points] == [int(4 * ORBITS)] * 3
+    assert [p["data"] for p in points] == [int(4 * ORBITS)] * 3
+    rows = list(csv.DictReader(open(f"{record['scan_dir']}/counters.csv")))
+    assert {r["fc_mode"] for r in rows} == {mode}
+    assert rig.chip.autocal_fc_qinj == [False]  # the calibration still ran with idle FC
+    rig.assert_clean()
+
+
+def test_qinj_sweep_together_enables_all_pixels_at_one_dac(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        other = (4, 7)
+        rig.chip.baselines[other] = (510, 4)
+        seen = []
+        set_dac = rig.chip.set_dac
+
+        def spy(row, col, dac):
+            set_dac(row, col, dac)
+            seen.append(sorted(p for p, f in rig.chip.pixels.items() if f["QInjEn"]))
+
+        rig.chip.set_dac = spy
+        record = rig.engine.qinj_scurve({"pixels": [list(PIXEL), list(other)], "qsels": [9], "method": "sweep",
+                                         "dac_min": 530, "dac_max": 532, "step": 2, "together": True,
+                                         "fc_mode": "custom Start QInj L1A Triggerbit multiple=2"})
+        (res,) = record["results"]
+        assert res["together"] and res["n_pixels"] == 2 and res["baselines"] == [BL, 510]
+        assert [p["dac"] for p in res["points"]] == [530, 532]
+        assert [p["data"] for p in res["points"]] == [2 * int(2 * ORBITS)] * 2
+        assert res["hits_per_l1a_per_pixel"] == [1.0, 1.0]
+        assert {tuple(e) for e in seen} == {(PIXEL, other)}
+        assert "Sweep_Together_2px_QInj_9" in record["pixel_files"][0]
+        rows = list(csv.DictReader(open(f"{record['scan_dir']}/counters.csv")))
+        assert {(r["row"], r["col"]) for r in rows} == {(f"{PIXEL[0]};4", f"{PIXEL[1]};7")}
+        rig.assert_clean()
+    finally:
+        rig.close()
+
+
+def test_qinj_sweep_with_trigger_path_off_reads_hits_without_trigger_bits(rig):
+    common = {"pixels": [list(PIXEL)], "qsels": [9], "method": "sweep", "dac_min": BL + 20, "dac_max": BL + 20}
+    on = rig.engine.qinj_scurve(dict(common))["results"][0]["points"][0]
+    off = rig.engine.qinj_scurve({**common, "trig_path": False})["results"][0]["points"][0]
+    assert on["trigbit"] == int(ORBITS) and on["data"] == on["header"] == int(ORBITS)
+    assert off["trigbit"] == 0 and off["data"] == off["header"] == int(ORBITS)
+    rig.assert_clean()
+
+
+def test_l1a_offset_and_l1a_delay_move_the_readout_window_together(tmp_path):
+    rig = Rig(tmp_path, latency_offset=3)  # in time when L1A - QInj = L1Adelay + 3, i.e. 504 = 501 + 3
+    try:
+        def point(offset):
+            mode = f"custom Start QInj L1A Triggerbit l1a_offset={offset}"
+            rec = rig.engine.qinj_scurve({"pixels": [list(PIXEL)], "qsels": [9], "method": "sweep",
+                                          "dac_min": BL + 20, "dac_max": BL + 20, "fc_mode": mode})
+            return rec["results"][0]["points"][0]
+
+        assert point(0)["data"] == int(ORBITS)
+        late = point(1)
+        assert late["data"] == 0 and late["trigbit"] == int(ORBITS) and late["header"] == int(ORBITS)
+        rig.engine.l1a_delay = 0x1F5 + 1
+        assert point(1)["data"] == int(ORBITS)  # K* = 501 - d*: one BX later is matched by one more delay
+        assert point(0)["data"] == 0
+        rig.assert_clean()
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"pixels": [[0, 0]], "fc_mode": ""},
+        {"pixels": [[0, 0]], "fc_mode": 3},
+        {"pixels": [[0, 0]], "together": 1},
+        {"pixels": [[0, 0]], "together": True},
+        {"pixels": [[0, 0]], "together": True, "method": "sweep"},
+        {"pixels": [[0, 0]], "trig_path": False},
+        {"pixels": [[0, 0]], "trig_path": "no", "method": "sweep"},
+        {"pixels": [[0, 0]], "method": "sweep", "dac_min": 600, "dac_max": 500},
+    ],
+)
+def test_bad_qinj_pattern_parameters_are_rejected(params):
+    with pytest.raises(ValueError):
+        validate_scan_params("qinj_scurve", params)
+
+
+def test_together_sweep_stopped_mid_scan_restores_every_pixel_and_the_fc(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        other = (4, 7)
+        rig.chip.baselines[other] = (510, 4)
+        set_dac = rig.chip.set_dac
+        calls = []
+
+        def stop_on_third(row, col, dac):
+            set_dac(row, col, dac)
+            calls.append(dac)
+            if len(calls) == 3:
+                rig.engine.stop_event.set()
+
+        rig.chip.set_dac = stop_on_third
+        with pytest.raises(ScanAborted):
+            rig.engine.qinj_scurve({"pixels": [list(PIXEL), list(other)], "qsels": [9], "method": "sweep",
+                                    "dac_min": 530, "dac_max": 540, "step": 1, "together": True,
+                                    "fc_mode": "custom Start QInj L1A Triggerbit multiple=2"})
+        rig.assert_clean()
+    finally:
+        rig.close()

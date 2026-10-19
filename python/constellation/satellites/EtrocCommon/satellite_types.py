@@ -51,7 +51,7 @@ CONFIG_KEYS = {
         "ws_active_channel", "ws_addresses",
     ),
     "EtrocCounters": (
-        "channel", "check_layout", "chip_address", "chip_name", "chip_setup", "connect_timeout",
+        "allow_unpaired_memo", "channel", "check_layout", "chip_address", "chip_name", "chip_setup", "connect_timeout",
         "fc_mode_on_launch", "firmware_window_s", "hostname", "i2c_port", "l1a_delay", "output_path", "port",
         "power_mode", "prescale_factor", "settle_windows", "socket_timeout", "ws_address",
     ),

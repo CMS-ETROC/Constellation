@@ -185,3 +185,58 @@ def test_window_latched_during_the_read_is_not_torn():
     finally:
         link.close()
         fake.stop()
+
+
+# ------------------------------------------------------------- l1a_offset memo word (plan A3 reverse)
+def test_l1a_offset_moves_every_l1a_and_leaves_the_qinj():
+    from ...EtrocCommon import fast_command as fc
+
+    assert fc.qinj_l1a_addresses(3) == [(0x005, 0x1FD), (0x3F5, 0x5ED), (0x7E5, 0x9DD)]
+    assert fc.qinj_l1a_addresses(3, -2) == [(0x005, 0x1FB), (0x3F5, 0x5EB), (0x7E5, 0x9DB)]
+    assert fc.qinj_l1a_addresses(4, 7)[3] == (0x009, 0x009 + 504 + 7)
+    flags = fc.parse_memo("Start QInj L1A Triggerbit l1a_offset=-12")
+    assert flags["l1a_offset"] == -12 and flags["loops"] == 1
+    assert fc.parse_memo("Start QInj L1A Triggerbit multiple=8")["l1a_offset"] == 0
+
+
+@pytest.mark.parametrize(
+    "memo, word",
+    [
+        ("Start QInj Triggerbit l1a_offset=2", "needs both QInj and L1A"),
+        ("Start L1A Triggerbit l1a_offset=2", "needs both QInj and L1A"),
+        ("Start QInj L1A Triggerbit l1a_offset=3100", "outside the orbit"),
+        ("Start QInj L1A Triggerbit l1a_offset=-515", "outside the orbit"),
+        ("Start QInj L1A Triggerbit l1a_offset=-504", "QInj address"),
+        ("Start QInj L1A Triggerbit multiple=378 l1a_offset=-4", "QInj address"),
+        ("Start BCR QInj L1A Triggerbit l1a_offset=-509", "BCR address"),
+        ("Start QInj L1A Triggerbit l1a_offset=two", "Unknown word"),
+    ],
+)
+def test_l1a_offset_refusals(memo, word):
+    from ...EtrocCommon import fast_command as fc
+
+    with pytest.raises(ValueError, match=word):
+        fc.parse_memo(memo)
+
+
+def test_l1a_offset_programs_the_l1a_k_bx_later(board):
+    fake, link, _ = board
+    link.configure_fc("Start QInj L1A Triggerbit l1a_offset=3")
+    assert fake.pattern[0x005] == 0x5
+    assert fake.pattern[0x1FD + 3] == 0x6
+    assert fake.pattern[0x1FD] == 0x0
+    assert fake.pattern.count(0x6) == 1 and fake.pattern.count(0x5) == 1
+    link.configure_fc("Start QInj L1A Triggerbit multiple=6 l1a_offset=-3")
+    l1as = [i for i, c in enumerate(fake.pattern) if c == 0x6]
+    qinj = [i for i, c in enumerate(fake.pattern) if c == 0x5]
+    assert len(qinj) == 6 and sorted(q + 504 - 3 for q in qinj) == l1as
+
+
+def test_memo_without_triggerbit_programs_trigdatasize_zero(board):
+    fake, link, _ = board
+    mark = len(fake.received)
+    link.configure_fc("Start QInj L1A")
+    reg12 = [v for kind, a, v in fake.received[mark:] if kind == "write_config" and a == 12]
+    assert reg12 and all((v >> 6) & 0b11 == 0 for v in reg12)
+    link.configure_fc("Start QInj L1A Triggerbit")
+    assert all((v >> 6) & 0b11 == 1 for v in fake.writes_to(12)[len(reg12):])
