@@ -123,3 +123,30 @@ def test_ctrl_c_in_run_closes_the_file_with_the_last_lines(setup, tmp_path, capl
     caplog.clear()
     sat.reentry()
     assert [r.getMessage() for r in caplog.records if "failed" in r.getMessage()] == []
+
+
+def event_record(words):
+    return types.SimpleNamespace(blocks=[np.asarray(words, dtype=">u4").tobytes()])
+
+
+@pytest.mark.parametrize("cut", [0, 1, 3])
+def test_stop_state_records_an_event_cut_before_its_trailer(setup, tmp_path, cut):
+    """R-KC7-SW-16: receiver_stop_state.json says whether the stream ended inside an event."""
+    from ...EtrocTransmitter.tests.event_fake import event_words
+
+    sat, tx, _ = setup
+    complete = event_words([(0, 14)], l1a_counter=1)
+    last = event_words([(0, 14)], l1a_counter=2)
+    words = complete + (last[:-cut] if cut else last)
+    run_id = f"run_cut{cut}"
+    assert call(tx, "start", run_id).verb_type == OK
+    wait_state(sat, SatelliteState.RUN)
+    sat.receive_data("EtrocTransmitter.a", event_record(words))
+    sat.do_stopping()  # what the stop transition runs once every EOR arrived
+    import json
+
+    state = json.loads((tmp_path / run_id / "receiver_stop_state.json").read_text())
+    assert state["in_event_at_stop"] is bool(cut)
+    assert state["boundaries_tracked"] and state["bytes_received"] == 4 * len(words)
+    lines = (tmp_path / run_id / "file_0.nem").read_text().splitlines()
+    assert [ln.split()[0] for ln in lines].count("ET") == (1 if cut else 2)

@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any
 
+import numpy as np
+
 from constellation.core.configuration import Configuration
 from constellation.core.transmitter_satellite import TransmitterSatellite
 
@@ -16,6 +18,17 @@ from ..EtrocCommon.config import load_typed_config
 from ..EtrocCommon.lifecycle import EtrocLifecycle
 from ..EtrocCommon.reconfigure import EtrocReconfigure
 from ..EtrocCommon.satellite_types import REQUIRED_KEYS
+
+# Top 12 bits of the KC705 filler words (clk2 0x553, 0x555, FIFO 0x556, time 0x559): the data FIFO
+# answers a read with these when it holds no event words (EtrocReceiver.FIXED_PATTERNS).
+FILLER_PREFIXES = (0x553, 0x555, 0x556, 0x559)
+
+
+def fillers_only(raw_bytes: bytes) -> bool:
+    """True if every 32-bit word of a FIFO read is a filler (no event word left in the FIFO)."""
+    words = np.frombuffer(raw_bytes, dtype=">u4")
+    return bool(words.size) and bool(np.isin(words >> 20, FILLER_PREFIXES).all())
+
 
 class EtrocTransmitter(
     KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, TransmitterSatellite, version=ETROC_SATELLITES_VERSION
@@ -45,13 +58,22 @@ class EtrocTransmitter(
         # A blocked TCP read (stalled board, KC7-FW-002) ends the run with an error after this many
         # seconds instead of hanging forever. 0 = wait forever (ETROC2v2 behaviour).
         "socket_timeout": 60.0,
+        # R-KC7-SW-16: at a stop, idle the fast commands, then read the FIFO until a read holds fillers
+        # only (at most drain_timeout s), so the last event keeps its trailer. 0 = the ETROC2v2 order
+        # (do_run returns at once and the FIFO words left are lost).
+        "drain_on_stop": 1,
+        "drain_timeout": 5.0,
     }
 
     # Keys `reconfigure` may change in ORBIT; the connection keys need a landing.
     RECONFIGURABLE_KEYS = (
         *KC705RegisterCommands.LAUNCH_REGISTERS,
         "prescale_factor", "fast_command_memo", "num_fifo_read", "clear_fifo", "reset_counter", "firmware",
+        "drain_on_stop", "drain_timeout",
     )
+
+    # upper bound of drain_timeout: the drain runs inside the stop transition
+    DRAIN_TIMEOUT_MAX_S = 60.0
 
     def configure_memo_FC(self, memo=None) -> None:
         """Program the FC memory from a memo string (grammar in EtrocCommon.fast_command)."""
@@ -63,6 +85,7 @@ class EtrocTransmitter(
 
         self._close_connection()
         self._daq_started = False
+        self._fc_idled_by_drain = False
         effective = load_typed_config(self, config, self.DEFAULT_CONFIG)
         # Reject a bad prescale factor or a malformed memo before any hardware access
         self._validate_settings(effective)
@@ -108,6 +131,12 @@ class EtrocTransmitter(
             cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "clear_fifo")
             time.sleep(2.1)
             self.configure_memo_FC()
+        elif getattr(self, "_fc_idled_by_drain", False):
+            # the drain of the previous stop left the fast commands idle
+            self.configure_memo_FC()
+        self._fc_idled_by_drain = False
+        self._drain_stats = {"enabled": bool(self.drain_on_stop), "ran": False}
+        self._fc_idle_unix = None
 
         # FPGA Presteps for DAQ
         if self.reset_counter:
@@ -135,6 +164,7 @@ class EtrocTransmitter(
         self._log_daq_toggle("before Start Pulse")
         # set before the pulse: a shutdown racing this start then sends a (harmless) stop_DAQ
         self._daq_started = True
+        self._daq_start_unix = time.time()
         cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "start_DAQ")
         time.sleep(0.1)
         self._log_daq_toggle("after Start Pulse")
@@ -147,12 +177,19 @@ class EtrocTransmitter(
         # Stop DAQ Session on FPGA
         self.log.info("Stopping DAQ on FPGA...")
         self._stop_daq()
+        daq_stop_unix = time.time()
 
-        # User tags of the end-of-run message
+        # User tags of the end-of-run message. The unix times bound the DAQ session (start_DAQ and
+        # stop_DAQ pulses) and, with the drain, the last fast command (FC idled before the stop).
         self.eor = {
             "stop_time": time.strftime("%Y-%m-%d-%H%M%S", time.localtime()),
             "register_7": cmd_interpret.read_config_reg(self.connection_socket, 7),
             "register_16": cmd_interpret.read_config_reg(self.connection_socket, 16),
+            "fast_command_memo": self.fast_command_memo,
+            "daq_start_unix": getattr(self, "_daq_start_unix", None),
+            "daq_stop_unix": daq_stop_unix,
+            "fc_idle_unix": getattr(self, "_fc_idle_unix", None),
+            "drain": getattr(self, "_drain_stats", {"enabled": bool(self.drain_on_stop), "ran": False}),
         }
         return f"Run {self.run_identifier} Stopped, EOR Sent"
 
@@ -167,13 +204,7 @@ class EtrocTransmitter(
                 continue
 
             # 3. Read the data FIFO
-            try:
-                raw_bytes = cmd_interpret.read_data_fifo(self.connection_socket, self.num_fifo_read)
-            except TimeoutError as e:
-                raise RuntimeError(
-                    f"KC705 data FIFO read of {self.num_fifo_read} words got no complete reply within "
-                    f"{self.socket_timeout} s: board stalled or link down (no fillers arriving)"
-                ) from e
+            raw_bytes = self._read_fifo()
 
             # 4. Handle an empty buffer
             if not raw_bytes:
@@ -181,11 +212,66 @@ class EtrocTransmitter(
                 time.sleep(0.1)
                 continue
 
-            data_record = self.new_data_record()
-            data_record.add_block(raw_bytes)
-            self.send_data_record(data_record)
+            self._send_block(raw_bytes)
 
+        if self.drain_on_stop:
+            return "Finished acquisition; " + self._drain_after_stop()
         return "Finished acquisition"
+
+    def _read_fifo(self) -> bytes:
+        try:
+            return cmd_interpret.read_data_fifo(self.connection_socket, self.num_fifo_read)
+        except TimeoutError as e:
+            raise RuntimeError(
+                f"KC705 data FIFO read of {self.num_fifo_read} words got no complete reply within "
+                f"{self.socket_timeout} s: board stalled or link down (no fillers arriving)"
+            ) from e
+
+    def _send_block(self, raw_bytes: bytes) -> None:
+        data_record = self.new_data_record()
+        data_record.add_block(raw_bytes)
+        self.send_data_record(data_record)
+
+    def _drain_after_stop(self) -> str:
+        """R-KC7-SW-16: idle the FC (no new L1A), then read the FIFO until a read holds fillers only.
+
+        Bounded by drain_timeout; the words read go out as data records before the EOR. A read that
+        never completes raises as in do_run (socket_timeout). Records the outcome in self._drain_stats.
+        """
+        t0 = time.monotonic()
+        self.configure_memo_FC(memo="Triggerbit")
+        self._fc_idled_by_drain = True
+        self._fc_idle_unix = time.time()
+        deadline = t0 + self.drain_timeout
+        reads = words = 0
+        clean = False
+        reason = "timeout"
+        while time.monotonic() < deadline:
+            if not self.can_send_record():
+                time.sleep(0.001)
+                continue
+            raw_bytes = self._read_fifo()
+            if not raw_bytes:
+                reason = "empty read (connection closed)"
+                break
+            reads += 1
+            words += len(raw_bytes) // 4
+            self._send_block(raw_bytes)
+            if fillers_only(raw_bytes):
+                clean = True
+                reason = "fillers only"
+                break
+        seconds = time.monotonic() - t0
+        self._drain_stats = {
+            "enabled": True, "ran": True, "clean": clean, "reason": reason, "reads": reads, "words": words,
+            "seconds": round(seconds, 3),
+        }
+        text = f"drain after FC idle: {reads} read(s), {words} words in {seconds:.2f} s, ended by {reason}"
+        if clean:
+            self.log.info(text)
+        else:
+            self.log.warning(text + f" (drain_timeout {self.drain_timeout} s): the last event may lack its trailer")
+        return text
 
     def _read_back_registers(self) -> dict[str, str]:
         """Config registers 4-8 and 13-15 as read from the board, as hex strings."""
@@ -235,6 +321,12 @@ class EtrocTransmitter(
     # ------------------------------------------------------------- reconfigure
     def _validate_settings(self, values: dict[str, Any]) -> None:
         self._validate_kc705_settings(values)
+        if "drain_on_stop" in values and values["drain_on_stop"] not in (0, 1, True, False):
+            raise ValueError(f"drain_on_stop must be 0 or 1, got {values['drain_on_stop']!r}")
+        if "drain_timeout" in values and not 0 < values["drain_timeout"] <= self.DRAIN_TIMEOUT_MAX_S:
+            raise ValueError(
+                f"drain_timeout must be > 0 and <= {self.DRAIN_TIMEOUT_MAX_S} s, got {values['drain_timeout']!r}"
+            )
 
     def _apply_reconfigure(self, plan: dict[str, Any]) -> list[str]:
         return self._reconfigure_kc705(plan)

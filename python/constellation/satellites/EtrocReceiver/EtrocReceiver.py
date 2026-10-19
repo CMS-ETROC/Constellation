@@ -150,10 +150,42 @@ class EtrocReceiver(EtrocReconfigure, EtrocLifecycle, ReceiverSatellite, version
             return
         run_duration = max(time.time() - self.start_time, 1e-9)
         self.data_rate = self.run_bytes_received * 8 / run_duration / 1e9
+        self._write_stop_state(run_duration)
         self.log.info(
             f"Stopped Run {self.run_identifier}. File closed safely. "
             f"Received {self.run_bytes_received / 1e6:.3g} MB in {run_duration:.0f} s ({self.data_rate:.3g} Gbps)"
         )
+
+    def _write_stop_state(self, run_duration: float) -> None:
+        """receiver_stop_state.json in the run directory: was the decoder inside an event at the stop?
+
+        R-KC7-SW-16: an event the stream cut before its trailer leaves the decoder inside the event.
+        The .nem shows it only once the second header word arrived (the EH line); this flag covers
+        every cut. Meaningful with translate = 1, or translate = 0 with skip_fillers = 1 (the raw
+        path tracks event boundaries only then).
+        """
+        tracked = bool(self.translate) or bool(self.skip_fillers)
+        state = {
+            "receiver": self.name,
+            "run_identifier": self.run_identifier,
+            "sender": self.run_sender,
+            "translate": int(self.translate),
+            "skip_fillers": int(self.skip_fillers),
+            "boundaries_tracked": tracked,
+            "in_event_at_stop": bool(self.translate_state[0]) if tracked else None,
+            "decoder_state_at_stop": str(self.translate_state[1]) if tracked else None,
+            "bytes_received": int(self.run_bytes_received),
+            "last_file_index": int(self.file_counter),
+            "start_unix": self.start_time,
+            "stop_unix": time.time(),
+            "run_seconds": round(run_duration, 3),
+        }
+        path = Path(self.output_path) / self.run_identifier / "receiver_stop_state.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(state, indent=1))
+        except OSError as e:
+            self.log.warning(f"Could not write {path}: {e}")
 
     @cscp_requestable()
     def get_data_rate(self) -> tuple[str, Any, dict[str, Any]]:

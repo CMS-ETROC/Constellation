@@ -156,6 +156,29 @@ loader imports only the files it was installed with, so a new module (e.g.
   `Triggerbit`, `BCR`, `QInj`, `L1A` and `multiple=N`, the word `l1a_offset=K` (K may be negative)
   places every L1A 504 + K BX after its QInj instead of 504; it needs `QInj` and `L1A`, and a
   placement outside the orbit or on another command's address is refused.
+- EtrocTransmitter stop order (R-KC7-SW-16): with `drain_on_stop = 1` (default) a stop
+  first idles the fast commands (memo `Triggerbit`, no new L1A), then reads the FIFO until
+  a read holds fillers only, at most `drain_timeout` seconds (default 5), and only then
+  ends `do_run`; `do_stopping` sends stop_DAQ afterwards. The last event keeps its trailer.
+  The EOR user tags carry `drain` (reads, words, seconds, clean, reason), `daq_start_unix`,
+  `fc_idle_unix`, `daq_stop_unix` and `fast_command_memo`. The next start replays the memo
+  (also with `clear_fifo = 0`). `drain_on_stop = 0` is the ETROC2v2 order.
+- EtrocReceiver writes `receiver_stop_state.json` into the run directory at every stop:
+  `in_event_at_stop` (the stream ended inside an event, i.e. the last event lost its
+  trailer), bytes received, last file index, start/stop times.
+- EtrocWaveform FC memo (R-KC7-SW-20): `fc_grammar = "fixed"` (default) plays exactly N
+  injections for `repeatedQInj=N` (and N L1As with `L1ARange`), 16 BX apart or spread with
+  `uniform`, and refuses schedules beyond the orbit (`uniform` above N = 187, more than 191
+  L1As). `fc_grammar = "legacy"` keeps the ETROC2v2 arithmetic (N+1 injections) for
+  comparison. `get_fc_schedule` returns the BX addresses written and played;
+  `read_fpga_counters` (ORBIT) returns the KC705 counters of the next 1 s window
+  (header = L1As answered per window).
+- EtrocWaveform run loop (R-KC7-SW-21): the WS-ready poll pauses 10 ms between reads and
+  checks the stop request on every pass; `ws_ready_timeout` (default 5 s) bounds it. One
+  file index per event, the same for every chip (`WS_rawData_<chip>_<event>.csv`);
+  `ws_events.csv` lists per event the WS-ready wait and the I2C read time, and
+  `ws_run_summary.json` the totals at stop. `max_events` (0 = no limit) ends the captures
+  of a run; the run then idles until it is stopped. `get_ws_status` reports the count.
 - `reconfigure` (ORBIT only) takes a dictionary of keys and applies them through the
   launch code: register keys are written and read back (the reply lists e.g.
   `polarity = 0x4123 (Reg14 read back 0x4123)`), a new `fast_command_memo` or
@@ -168,8 +191,8 @@ loader imports only the files it was installed with, so a new module (e.g.
 
   | Type | Keys |
   |---|---|
-  | EtrocTransmitter | `active_channel`, `timestamp`, `triggerbit_delay`, `polarity`, `counter_duration`, `fc_delays`, `data_delays_01`, `data_delays_23`, `prescale_factor`, `fast_command_memo`, `num_fifo_read`, `clear_fifo`, `reset_counter`, `firmware` |
-  | EtrocWaveform | the EtrocTransmitter keys, `ws_active_channel`, `active_boards` |
+  | EtrocTransmitter | `active_channel`, `timestamp`, `triggerbit_delay`, `polarity`, `counter_duration`, `fc_delays`, `data_delays_01`, `data_delays_23`, `prescale_factor`, `fast_command_memo`, `num_fifo_read`, `clear_fifo`, `reset_counter`, `firmware`, `drain_on_stop`, `drain_timeout` |
+  | EtrocWaveform | the EtrocTransmitter keys (without the drain keys), `ws_active_channel`, `active_boards`, `fc_grammar`, `max_events`, `ws_ready_timeout` |
   | EtrocReceiver | `translate`, `skip_fillers`, `keep_time`, `flush_interval` (takes effect at the next start) |
   | EtrocCounters | `channel`, `fc_mode_on_launch`, `prescale_factor`, `check_layout`, `settle_windows`, `l1a_delay`, the `kc705_registers` section (keys present at initialize); refused while a scan runs |
 
