@@ -184,6 +184,15 @@ loader imports only the files it was installed with, so a new module (e.g.
   `ws_events.csv` lists per event the WS-ready wait and the I2C read time, and
   `ws_run_summary.json` the totals at stop. `max_events` (0 = no limit) ends the captures
   of a run; the run then idles until it is stopped. `get_ws_status` reports the count.
+- EtrocWaveform pixel and sampler keys: the launch configures `ws_pixel` (default [0, 14], the
+  pixel the sampler is wired to: manual "pixel 224" = PixelID col 14, row 0) with `qsel` (0x1e),
+  `qinj_en` (true) and DAC = baseline + `offset` (10), as the launch hard-coded before.
+  `trigger_pixels` (flat [row, col, ...], default empty) are injected at `qsel` as well: with
+  `qinj_en = false` they give the trigger bit, and so the sampler stop, at the same time without
+  charge on the sampled pixel (a control). `rfsel` (-1 = not written) sets the preamp feedback.
+  `ws_sel1` (1 = VGA amplifier) and `ws_sel2` (1 = power on 400 ns after ws_start) are the
+  regOut1F mode bits `ws_start_sampling` writes (default 0, 0 = regOut1F 0x0b as before).
+  `ws_run_summary.json` and `get_ws_status` record them with the baselines.
 - `reconfigure` (ORBIT only) takes a dictionary of keys and applies them through the
   launch code: register keys are written and read back (the reply lists e.g.
   `polarity = 0x4123 (Reg14 read back 0x4123)`), a new `fast_command_memo` or
@@ -197,7 +206,7 @@ loader imports only the files it was installed with, so a new module (e.g.
   | Type | Keys |
   |---|---|
   | EtrocTransmitter | `active_channel`, `timestamp`, `triggerbit_delay`, `polarity`, `counter_duration`, `fc_delays`, `data_delays_01`, `data_delays_23`, `prescale_factor`, `fast_command_memo`, `num_fifo_read`, `clear_fifo`, `reset_counter`, `firmware`, `drain_on_stop`, `drain_timeout`, `post_start_sleep_s` |
-  | EtrocWaveform | the EtrocTransmitter keys (without the drain keys), `ws_active_channel`, `active_boards`, `fc_grammar`, `max_events`, `ws_ready_timeout` |
+  | EtrocWaveform | the EtrocTransmitter keys (without the drain keys), `ws_active_channel`, `active_boards`, `fc_grammar`, `max_events`, `ws_ready_timeout`, the pixel keys `ws_pixel`, `qsel`, `qinj_en`, `offset`, `trigger_pixels`, `rfsel` (rerun the launch's pixel sequence over I2C), `ws_sel1`, `ws_sel2` (next ws start) |
   | EtrocReceiver | `translate`, `skip_fillers`, `keep_time`, `flush_interval` (takes effect at the next start) |
   | EtrocCounters | `channel`, `fc_mode_on_launch`, `prescale_factor`, `check_layout`, `settle_windows`, `l1a_delay`, the `kc705_registers` section (keys present at initialize); refused while a scan runs |
 

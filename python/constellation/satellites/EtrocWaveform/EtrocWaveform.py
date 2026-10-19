@@ -118,6 +118,18 @@ def fc_schedule(memo: str, grammar: str = "fixed") -> dict[str, Any]:
 WS_READY_POLL_S = 5.0
 # pause between two WS-ready reads (R-KC7-SW-21: the ETROC2v2 loop polled without a pause)
 WS_POLL_INTERVAL_S = 0.01
+# The pixel the WS samples: ETROC2 manual sec. 6.1, "pixel 224"; PixelID = Col[3:0],Row[3:0] (PixSta0), so
+# 224 = 0xE0 = column 14, row 0. ws_pixel moves the injected pixel (the sampler stays on (0, 14)).
+WS_PIXEL = [0, 14]
+# Keys that rewrite the pixel configuration over I2C (launch, or reconfigure in ORBIT)
+PIXEL_KEYS = ("ws_pixel", "qsel", "qinj_en", "offset", "trigger_pixels", "rfsel")
+
+
+def pixel_pairs(flat: list[int]) -> list[tuple[int, int]]:
+    """[r0, c0, r1, c1, ...] -> [(r0, c0), (r1, c1), ...] (TOML arrays of arrays do not survive the config)."""
+    return [(flat[i], flat[i + 1]) for i in range(0, len(flat) - 1, 2)]
+
+
 # batch_ws_read_data: 1024 x (I2C write + read) per chip. About 20 s per chip per event according to
 # notes/review-sw-kc705-constellation-i2cgui-waferprobe.md; not timed on the bench yet.
 WS_READ_S_PER_CHIP = 20.0
@@ -151,6 +163,20 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         "ws_addresses": [0x40],
         "chip_names": ["typeD_board"],
         "offset": 10,
+        # Pixel configured at launch (and on reconfigure): [row, col], its QSel and QInjEn. The defaults are
+        # what the launch hard-coded up to ETROC2v3 daafea22: (0, 14), QSel 0x1e, QInjEn 1, DAC = BL + offset.
+        "ws_pixel": list(WS_PIXEL),
+        "qsel": 0x1E,
+        "qinj_en": True,
+        # Extra pixels injected at qsel (flat [row, col, row, col, ...]): a trigger-bit source that does not
+        # touch the WS pixel, for a qinj_en = false control with the same timing. Empty = none.
+        "trigger_pixels": [],
+        # Preamp feedback resistor RFSel of the configured pixels (0 = highest gain); -1 = not written
+        "rfsel": -1,
+        # Waveform-sampler mode bits written by ws_start_sampling (regOut1F[7], [6]; manual sec. 6.5):
+        # ws_sel1 1 = VGA amplifier (0 = bypass), ws_sel2 1 = power on 400 ns after ws_start (0 = until ws_stop)
+        "ws_sel1": 0,
+        "ws_sel2": 0,
         "ws_active_channel": 0x0091,
         "output_path": "./",
         "connect_timeout": 5.0,
@@ -163,13 +189,15 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         "ws_ready_timeout": WS_READY_POLL_S,
     }
 
-    # Keys `reconfigure` may change in ORBIT. The connection, the I2C adapter and chips (set up at
-    # launch: calibration, pixel offset) and the output directory need a landing.
+    # Keys `reconfigure` may change in ORBIT. The connection, the I2C adapter, the chip list and the output
+    # directory need a landing. PIXEL_KEYS rerun the launch's pixel sequence over the open adapter (all off,
+    # auto-calibration, enable); ws_sel1 / ws_sel2 take effect at the next ws_start_sampling (run start, event).
     RECONFIGURABLE_KEYS = (
         *KC705RegisterCommands.LAUNCH_REGISTERS,
         "prescale_factor", "fast_command_memo", "ws_active_channel",
         "num_fifo_read", "clear_fifo", "reset_counter", "firmware", "active_boards",
         "fc_grammar", "max_events", "ws_ready_timeout",
+        *PIXEL_KEYS, "ws_sel1", "ws_sel2",
     )
 
     WS_READY_TIMEOUT_MAX_S = 60.0
@@ -291,9 +319,7 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         )
         self.i2c_conn.batch_PLL_FC_calibration()
         self.i2c_conn.batch_set_chip_peripherals()
-        self.i2c_conn.batch_disable_all_chips(power_mode='high')
-        self.i2c_conn.batch_auto_calibrate_chip(pixel_list=[(0, 14)])
-        self.i2c_conn.batch_enable_pixels(pixel_list=[(0, 14)], offset=self.offset)
+        self._configure_pixels()
 
         self._close_connection()
         self.connection_socket = cmd_interpret.open_socket(
@@ -311,6 +337,48 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         self.configure_memo_FC()
         self.log.info("Socket connected, FPGA Registers and Fast Command configured")
         return "Launched - Socket connected, FPGA Registers and Fast Command configured"
+
+    def _configure_pixels(self) -> str:
+        """All pixels off, auto-calibrate the configured pixels, enable them at DAC = BL + offset.
+
+        The WS pixel gets qsel / qinj_en; trigger_pixels get qsel with QInjEn 1. Returns a one-line summary.
+        """
+        ws = (self.ws_pixel[0], self.ws_pixel[1])
+        trig = pixel_pairs(self.trigger_pixels)
+        rfsel = None if self.rfsel < 0 else self.rfsel
+        self.i2c_conn.batch_disable_all_chips(power_mode='high')
+        self.i2c_conn.batch_auto_calibrate_chip(pixel_list=[ws, *trig])
+        self.i2c_conn.batch_enable_pixels(
+            pixel_list=[ws], Qsel=self.qsel, QInjEn=self.qinj_en, offset=self.offset, rfsel=rfsel
+        )
+        if trig:
+            self.i2c_conn.batch_enable_pixels(pixel_list=trig, Qsel=self.qsel, QInjEn=True, offset=self.offset, rfsel=rfsel)
+        self._pixel_state = {
+            "ws_pixel": list(ws), "qsel": self.qsel, "qinj_en": bool(self.qinj_en), "offset": self.offset,
+            "trigger_pixels": [list(p) for p in trig], "rfsel": self.rfsel, "baselines": self._baselines(),
+        }
+        text = (
+            f"pixel ({ws[0]},{ws[1]}) QSel {self.qsel} QInjEn {int(bool(self.qinj_en))}, DAC = BL + {self.offset}"
+            + (f", trigger pixels {trig} QInjEn 1" if trig else "")
+            + (f", RFSel {self.rfsel}" if rfsel is not None else "")
+        )
+        self.log.info(f"Pixels configured: {text}; baselines {self._pixel_state['baselines']}")
+        return text
+
+    def _baselines(self) -> list[dict[str, Any]]:
+        """Auto-calibrated baselines the wrapper holds (empty when it holds none)."""
+        out: list[dict[str, Any]] = []
+        bl = getattr(self.i2c_conn, "BL_df", None)
+        if not isinstance(bl, dict):
+            return out
+        for addr, df in bl.items():
+            try:
+                for r in df.itertuples():
+                    out.append({"chip": hex(addr), "row": int(r.row), "col": int(r.col),
+                                "baseline": int(r.baseline), "noise_width": int(r.noise_width)})
+            except Exception:  # noqa: BLE001 - a record, never a reason to fail the configuration
+                continue
+        return out
 
     def do_landing(self) -> str:
         self.configure_memo_FC(memo="Triggerbit")
@@ -344,7 +412,7 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "timestamp", modified_timestamp)
         time.sleep(0.1)
 
-        self.i2c_conn.batch_ws_start_sampling()
+        self.i2c_conn.batch_ws_start_sampling(sel1=self.ws_sel1, sel2=self.ws_sel2)
         cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "ws_clear_pulse")
         cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "clear_ws_block")
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "active_channel", self.ws_active_channel)
@@ -377,6 +445,11 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
             "chips": list(getattr(self, "chip_names", [])),
             "fc_grammar": getattr(self, "fc_grammar", None),
             "fast_command_memo": getattr(self, "fast_command_memo", None),
+            "ws_active_channel": getattr(self, "ws_active_channel", None),
+            "triggerbit_delay": getattr(self, "triggerbit_delay", None),
+            "ws_sel1": getattr(self, "ws_sel1", None),
+            "ws_sel2": getattr(self, "ws_sel2", None),
+            "pixels": getattr(self, "_pixel_state", None),
         }
 
     def _write_run_summary(self) -> None:
@@ -455,7 +528,7 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
             self.log.info(f"Event {event}: WS ready after {waited:.2f} s, read of {len(dfs)} chip(s) took {read_s:.1f} s")
 
             # Restart WS cycle
-            self.i2c_conn.batch_ws_start_sampling()
+            self.i2c_conn.batch_ws_start_sampling(sel1=self.ws_sel1, sel2=self.ws_sel2)
             cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "ws_clear_pulse")
             cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "clear_ws_block")
 
@@ -495,9 +568,38 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
             raise ValueError(
                 f"ws_ready_timeout must be > 0 and <= {self.WS_READY_TIMEOUT_MAX_S} s, got {values['ws_ready_timeout']}"
             )
+        self._validate_pixel_settings(values)
+
+    def _validate_pixel_settings(self, values: dict[str, Any]) -> None:
+        """ws_pixel, trigger_pixels, qsel, offset, rfsel, ws_sel1/2 (the keys present; the others as configured)."""
+
+        def is_pixel(pair) -> bool:
+            return len(pair) == 2 and all(isinstance(v, int) and 0 <= v <= 15 for v in pair)
+
+        if "ws_pixel" in values and not is_pixel(values["ws_pixel"]):
+            raise ValueError(f"ws_pixel must be [row, col] with 0-15 each, got {values['ws_pixel']}")
+        if "trigger_pixels" in values:
+            flat = values["trigger_pixels"]
+            if len(flat) % 2 or not all(is_pixel(p) for p in pixel_pairs(flat)):
+                raise ValueError(f"trigger_pixels must be a flat list [row, col, row, col, ...] with 0-15 each, got {flat}")
+        ws = tuple(values.get("ws_pixel", getattr(self, "ws_pixel", WS_PIXEL)))
+        trig = pixel_pairs(values.get("trigger_pixels", getattr(self, "trigger_pixels", [])))
+        if ws in trig or len(set(trig)) != len(trig):
+            raise ValueError(f"trigger_pixels {trig} must be distinct and must not contain ws_pixel {list(ws)}")
+        if "qsel" in values and not 0 <= values["qsel"] <= 31:
+            raise ValueError(f"qsel must be 0-31 (QSel[4:0]), got {values['qsel']}")
+        if "offset" in values and not -1023 <= values["offset"] <= 1023:
+            raise ValueError(f"offset (DAC = BL + offset) must be within +-1023, got {values['offset']}")
+        if "rfsel" in values and values["rfsel"] not in (-1, 0, 1, 2, 3):
+            raise ValueError(f"rfsel must be 0-3, or -1 to leave it unwritten, got {values['rfsel']}")
+        for key in ("ws_sel1", "ws_sel2"):
+            if key in values and values[key] not in (0, 1):
+                raise ValueError(f"{key} must be 0 or 1, got {values[key]}")
 
     def _apply_reconfigure(self, plan: dict[str, Any]) -> list[str]:
         changes = self._reconfigure_kc705(plan)
+        if any(key in plan for key in PIXEL_KEYS):
+            changes.append("pixels reconfigured over I2C: " + self._configure_pixels())
         if "fc_grammar" in plan and "fast_command_memo" not in plan and "prescale_factor" not in plan:
             self.configure_memo_FC()
             changes.append(f"FC memory reprogrammed from '{self.fast_command_memo}' ({self.fc_grammar} grammar)")

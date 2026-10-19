@@ -270,9 +270,11 @@ class i2c_connection:
 
     def config_single_pixel(self, addr: int, row: int, col: int, Qsel: int = 0x1e,
                             QInjEn: bool = False, Bypass_THCal: bool = True,
-                            power_mode: str = "high", manual_DAC: int = 0x3ff):
+                            power_mode: str = "high", manual_DAC: int = 0x3ff, rfsel: int | None = None):
         """
         Sets all parameters for a specific pixel in one fast transaction.
+        rfsel (preamp feedback resistor, PixCfg0[6:5], 0 = largest R = highest gain) is written only when given;
+        otherwise the pixel keeps the value it has (chip default 2).
         """
         chip = self._resolve_chip(addr)
         chip.row, chip.col = row, col
@@ -286,6 +288,8 @@ class i2c_connection:
             'TH_offset': 0x14, 'QSel': Qsel, 'DAC': manual_DAC,
             'enable_TDC': 1, 'IBSel': ibsel_val,
         }
+        if rfsel is not None:
+            settings['RFSel'] = rfsel
 
         chip.read_all_block("ETROC2", "Pixel Config")
 
@@ -335,7 +339,8 @@ class i2c_connection:
 
     def batch_enable_pixels(self, pixel_list: list[tuple], Qsel: int = 0x1e,
                             QInjEn: bool = True, Bypass_THCal: bool = True,
-                            power_mode: str = "high", offset: int = None, manual_DAC: int = 0x3ff):
+                            power_mode: str = "high", offset: int = None, manual_DAC: int = 0x3ff,
+                            rfsel: int | None = None):
         """
         Loops through a provided list of (row, col) tuples and configures them.
         If 'offset' is provided, it automatically grabs the baseline from self.BL_df.
@@ -354,7 +359,7 @@ class i2c_connection:
                 self.config_single_pixel(
                     addr, row, col, Qsel=Qsel, QInjEn=QInjEn,
                     Bypass_THCal=Bypass_THCal, power_mode=power_mode,
-                    manual_DAC=final_dac
+                    manual_DAC=final_dac, rfsel=rfsel
                 )
             self.logger.info(f'  Finished pixels configuration for ({hex(addr)})...')
 
@@ -584,15 +589,21 @@ class i2c_connection:
     # ==========================================
     # LEVEL 1: WAVEFORM SAMPLER (WS) METHODS
     # ==========================================
-    def ws_start_sampling(self, addr: int):
-        """Initializes and starts the Waveform Sampler for a single chip."""
+    def ws_start_sampling(self, addr: int, sel1: int = 0, sel2: int = 0):
+        """Initializes and starts the Waveform Sampler for a single chip.
+
+        regOut1F ends at 0x0b (mem_rstn, en_clk, clk_gen_rstn = 1; rd_en_I2C, sel3 = 0) plus the mode bits
+        (ETROC2 manual sec. 6.5): sel1 (bit 7) 1 = VGA amplifier, 0 = bypass; sel2 (bit 6) selects the
+        power-on mode (1 = 400 ns after ws_start, 0 = from ws_start until ws_stop, keeping the last 400 ns).
+        """
         chip = self._resolve_chip(addr)
+        final = 0x0b | ((sel1 & 1) << 7) | ((sel2 & 1) << 6)
 
         # 1. State Machine Reset & Start
         chip.read_register("Waveform Sampler", "Config", "regOut1F")
         chip["Waveform Sampler", "Config", "regOut1F"] = 0x22
         chip.write_register("Waveform Sampler", "Config", "regOut1F")
-        chip["Waveform Sampler", "Config", "regOut1F"] = 0x0b
+        chip["Waveform Sampler", "Config", "regOut1F"] = final
         chip.write_register("Waveform Sampler", "Config", "regOut1F")
 
         # 2. Memory Reset Toggle
@@ -701,11 +712,11 @@ class i2c_connection:
     # ==========================================
     # LEVEL 2: BATCH WS OPERATIONS
     # ==========================================
-    def batch_ws_start_sampling(self):
-        """Starts the Waveform Sampler on all registered chips."""
+    def batch_ws_start_sampling(self, sel1: int = 0, sel2: int = 0):
+        """Starts the Waveform Sampler on all registered chips (sel1 / sel2: see ws_start_sampling)."""
         self.logger.info("Batch starting WS sampling...")
         for addr in self.chip_addresses:
-            self.ws_start_sampling(addr)
+            self.ws_start_sampling(addr, sel1=sel1, sel2=sel2)
 
     def batch_ws_stop_sampling(self):
         """Stops the Waveform Sampler on all registered chips."""
