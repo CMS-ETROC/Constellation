@@ -48,8 +48,8 @@ CONFIG_KEYS = {
     "EtrocReceiver": ("flush_interval", "keep_time", "output_path", "skip_fillers", "translate"),
     "EtrocWaveform": _KC705_KEYS + (
         "active_boards", "chip_addresses", "chip_names", "fc_grammar", "i2c_port", "max_events", "offset",
-        "output_path", "qinj_en", "qsel", "rfsel", "trigger_pixels", "ws_active_channel", "ws_addresses",
-        "ws_pixel", "ws_ready_timeout", "ws_sel1", "ws_sel2",
+        "output_path", "pixel_readback", "qinj_en", "qinj_spacing_bx", "qsel", "rfsel", "trigger_pixels",
+        "ws_active_channel", "ws_addresses", "ws_pixel", "ws_ready_timeout", "ws_sel1", "ws_sel2",
     ),
     "EtrocCounters": (
         "allow_unpaired_memo", "channel", "check_layout", "chip_address", "chip_name", "chip_setup", "connect_timeout",

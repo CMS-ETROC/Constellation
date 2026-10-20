@@ -301,9 +301,23 @@ class i2c_connection:
 
         chip.write_all_block("ETROC2", "Pixel Config")
 
+    def read_pixel_config(self, addr: int, row: int, col: int, fields) -> dict:
+        """Read one pixel's Pixel Config block from the chip; returns {field: value} for `fields` (read only)."""
+        chip = self._resolve_chip(addr)
+        chip.row, chip.col = row, col
+        chip.read_all_block("ETROC2", "Pixel Config")
+        return {f: int(chip.get_decoded_value("ETROC2", "Pixel Config", f)) for f in fields}
+
     # ==========================================
     # LEVEL 2: BATCH OPERATIONS / ORCHESTRATORS
     # ==========================================
+    def batch_read_pixel_config(self, pixel_list: list[tuple], fields) -> dict:
+        """read_pixel_config of every pixel on every chip: {hex(chip address): {"row,col": {field: value}}}."""
+        return {
+            hex(addr): {f"{r},{c}": self.read_pixel_config(addr, r, c, fields) for r, c in pixel_list}
+            for addr in self.chip_addresses
+        }
+
     def batch_auto_calibrate_chip(self, pixel_list: list[tuple]):
         """
         Orchestrates a full 16x16 calibration scan for ONE chip and saves the DataFrame.

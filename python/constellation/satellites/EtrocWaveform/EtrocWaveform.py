@@ -66,8 +66,12 @@ def _legacy_addresses(base: int, loops: int, uniform: bool, do_loop: bool) -> li
     return out
 
 
-def fc_schedule(memo: str, grammar: str = "fixed") -> dict[str, Any]:
+def fc_schedule(memo: str, grammar: str = "fixed", spacing_bx: int = REPEAT_STEP_BX) -> dict[str, Any]:
     """The FC memory writes a memo makes, without hardware.
+
+    spacing_bx (the qinj_spacing_bx key, default 16): BX between successive injections of repeatedQInj=N (and
+    their L1As with L1ARange) in the fixed grammar without 'uniform'. The legacy grammar and 'uniform' keep
+    their own spacing; a spacing other than 16 is refused with the legacy grammar.
 
     Returns {"grammar", "memo", "start", "triggerbit", "bcr", "qinj_bx", "l1a_bx" (addresses written,
     in write order), "played_qinj_bx", "played_l1a_bx" (distinct addresses inside the orbit after the
@@ -77,6 +81,10 @@ def fc_schedule(memo: str, grammar: str = "fixed") -> dict[str, Any]:
     if grammar not in FC_GRAMMARS:
         raise ValueError(f"fc_grammar must be one of {FC_GRAMMARS}, got {grammar!r}")
     f = parse_waveform_memo(memo)
+    if not 1 <= spacing_bx <= ORBIT_LAST_BX:
+        raise ValueError(f"qinj_spacing_bx must be 1-{ORBIT_LAST_BX} BX, got {spacing_bx}")
+    if grammar == "legacy" and spacing_bx != REPEAT_STEP_BX:
+        raise ValueError(f"qinj_spacing_bx = {spacing_bx} needs the fixed grammar (legacy places injections 16 BX apart)")
     if grammar == "legacy":
         loops = f["repeat"] if f["repeat"] is not None else 1
         qinj = _legacy_addresses(QINJ_BASE_BX, loops, f["uniform"], f["repeatedQInj"]) if f["QInj"] else []
@@ -85,7 +93,7 @@ def fc_schedule(memo: str, grammar: str = "fixed") -> dict[str, Any]:
         n = f["repeat"] if f["repeat"] is not None else 1
         if n < 1:
             raise ValueError(f"repeatedQInj={n}: the repeat count must be at least 1")
-        step = REPEAT_STEP_BX
+        step = spacing_bx
         if f["uniform"]:
             interval = UNIFORM_SPAN_STEPS // n
             if interval < 1:
@@ -110,7 +118,7 @@ def fc_schedule(memo: str, grammar: str = "fixed") -> dict[str, Any]:
 
     return {
         "grammar": grammar, "memo": memo, "start": f["Start"], "triggerbit": f["Triggerbit"], "bcr": f["BCR"],
-        "qinj_bx": qinj, "l1a_bx": l1a, "played_qinj_bx": played(qinj), "played_l1a_bx": played(l1a),
+        "spacing_bx": spacing_bx if grammar == "fixed" and not f["uniform"] else None, "qinj_bx": qinj, "l1a_bx": l1a, "played_qinj_bx": played(qinj), "played_l1a_bx": played(l1a),
     }
 
 
@@ -123,6 +131,8 @@ WS_POLL_INTERVAL_S = 0.01
 WS_PIXEL = [0, 14]
 # Keys that rewrite the pixel configuration over I2C (launch, or reconfigure in ORBIT)
 PIXEL_KEYS = ("ws_pixel", "qsel", "qinj_en", "offset", "trigger_pixels", "rfsel")
+# Pixel Config fields read back from the chip when pixel_readback is on (run start and run stop)
+READBACK_FIELDS = ("QInjEn", "QSel", "RFSel", "DAC", "TH_offset", "disDataReadout", "disTrigPath", "enable_TDC")
 
 
 def pixel_pairs(flat: list[int]) -> list[tuple[int, int]]:
@@ -177,6 +187,11 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         # ws_sel1 1 = VGA amplifier (0 = bypass), ws_sel2 1 = power on 400 ns after ws_start (0 = until ws_stop)
         "ws_sel1": 0,
         "ws_sel2": 0,
+        # BX between the injections of repeatedQInj=N (fixed grammar, not 'uniform'); 16 = as before
+        "qinj_spacing_bx": REPEAT_STEP_BX,
+        # read the Pixel Config of ws_pixel and trigger_pixels back from the chip at each run start (before the
+        # first capture) and run stop (after the last); recorded in ws_run_summary.json. Off = as before
+        "pixel_readback": False,
         "ws_active_channel": 0x0091,
         "output_path": "./",
         "connect_timeout": 5.0,
@@ -197,7 +212,7 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         "prescale_factor", "fast_command_memo", "ws_active_channel",
         "num_fifo_read", "clear_fifo", "reset_counter", "firmware", "active_boards",
         "fc_grammar", "max_events", "ws_ready_timeout",
-        *PIXEL_KEYS, "ws_sel1", "ws_sel2",
+        *PIXEL_KEYS, "ws_sel1", "ws_sel2", "qinj_spacing_bx", "pixel_readback",
     )
 
     WS_READY_TIMEOUT_MAX_S = 60.0
@@ -208,13 +223,14 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
 
     def _check_memo(self, memo: str) -> None:
         """Validate a memo against the EtrocWaveform grammar in use (fc_grammar)."""
-        fc_schedule(memo, getattr(self, "_grammar_for_check", None) or getattr(self, "fc_grammar", "fixed"))
+        spacing = getattr(self, "_spacing_for_check", None) or getattr(self, "qinj_spacing_bx", REPEAT_STEP_BX)
+        fc_schedule(memo, getattr(self, "_grammar_for_check", None) or getattr(self, "fc_grammar", "fixed"), spacing)
 
     def configure_memo_FC(self, memo=None) -> None:
         """Program the FC memory from a memo in the fc_grammar in use, then start the playback."""
         memo_str = memo if memo is not None else self.fast_command_memo
         grammar = getattr(self, "fc_grammar", "fixed")
-        sched = fc_schedule(memo_str, grammar)
+        sched = fc_schedule(memo_str, grammar, getattr(self, "qinj_spacing_bx", REPEAT_STEP_BX))
         base_reg12 = fast_command.BASE_REG12_TRIGGERBIT if sched["triggerbit"] else fast_command.BASE_REG12_NO_TRIGGERBIT
         if sched["qinj_bx"]:
             self.log.info(
@@ -243,7 +259,7 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
     @cscp_requestable()
     def get_fc_schedule(self) -> tuple[str, Any, dict]:
         """The FC memory writes of the configured memo and grammar (computed, no hardware access)."""
-        sched = fc_schedule(self.fast_command_memo, self.fc_grammar)
+        sched = fc_schedule(self.fast_command_memo, self.fc_grammar, self.qinj_spacing_bx)
         return (
             f"{len(sched['played_qinj_bx'])} QInj, {len(sched['played_l1a_bx'])} L1A per orbit ({self.fc_grammar})",
             sched, {},
@@ -412,6 +428,8 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "timestamp", modified_timestamp)
         time.sleep(0.1)
 
+        self._readback = {}
+        self._read_back_pixels("start")
         self.i2c_conn.batch_ws_start_sampling(sel1=self.ws_sel1, sel2=self.ws_sel2)
         cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "ws_clear_pulse")
         cmd_interpret.write_pulse_reg_decoded(self.connection_socket, "clear_ws_block")
@@ -424,14 +442,38 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
 
         return f"Run {run_identifier} Session Started"
 
-    def do_stopping(self) -> str:
-        """End the run. Add run metadata for end-of-run event"""
+    def do_stopping(self, readback: bool = True) -> str:
+        """End the run. Add run metadata for end-of-run event (readback: the pixel read-back, off when quiescing)"""
         time.sleep(0.1)
         cmd_interpret.write_config_reg_decoded(self.connection_socket, "active_channel", self.active_channel)
+        if readback:
+            self._read_back_pixels("stop")
         self._ws_run_active = False
         time.sleep(0.1)
         self._write_run_summary()
         return f"Run {self.run_identifier} Stopped"
+
+    def _read_back_pixels(self, tag: str) -> None:
+        """With pixel_readback: the READBACK_FIELDS of ws_pixel and trigger_pixels as the chip holds them.
+
+        Stored under `tag` in the run summary's pixel_readback; a failed read is recorded, never raised (a record,
+        not a reason to fail the run)."""
+        if not getattr(self, "pixel_readback", False):
+            return
+        if not isinstance(getattr(self, "_readback", None), dict):
+            self._readback = {}
+        pixels = [tuple(self.ws_pixel), *pixel_pairs(self.trigger_pixels)]
+        t0 = time.monotonic()
+        try:
+            values = self.i2c_conn.batch_read_pixel_config(pixel_list=pixels, fields=READBACK_FIELDS)
+            entry: dict[str, Any] = {"values": values}
+        except Exception as e:  # noqa: BLE001
+            entry = {"error": f"{type(e).__name__}: {e}"}
+            self.log.warning(f"Pixel read-back at run {tag} failed: {entry['error']}")
+        entry.update({"unix": round(time.time(), 3), "seconds": round(time.monotonic() - t0, 3)})
+        self._readback[tag] = entry
+        if "values" in entry:
+            self.log.info(f"Pixel read-back at run {tag}: {entry['values']}")
 
     def _ws_summary(self) -> dict[str, Any]:
         return {
@@ -450,6 +492,8 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
             "ws_sel1": getattr(self, "ws_sel1", None),
             "ws_sel2": getattr(self, "ws_sel2", None),
             "pixels": getattr(self, "_pixel_state", None),
+            "qinj_spacing_bx": getattr(self, "qinj_spacing_bx", None),
+            "pixel_readback": getattr(self, "_readback", None) if getattr(self, "pixel_readback", False) else None,
         }
 
     def _write_run_summary(self) -> None:
@@ -556,12 +600,17 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
             raise ValueError(f"fc_grammar must be one of {FC_GRAMMARS}, got {grammar!r}")
         # the memo is checked in the grammar it will be played with (a reconfigure may change both)
         self._grammar_for_check = grammar
+        self._spacing_for_check = values.get("qinj_spacing_bx", getattr(self, "qinj_spacing_bx", REPEAT_STEP_BX))
         try:
             self._validate_kc705_settings(values)
-            if "fc_grammar" in values and "fast_command_memo" not in values and hasattr(self, "fast_command_memo"):
+            schedule_keys = ("fc_grammar" in values or "qinj_spacing_bx" in values)
+            if schedule_keys and "fast_command_memo" not in values and hasattr(self, "fast_command_memo"):
                 self._check_memo(self.fast_command_memo)
+            elif "qinj_spacing_bx" in values and "fast_command_memo" not in values:
+                fc_schedule("Start", grammar, self._spacing_for_check)  # range and grammar check at initialize
         finally:
             self._grammar_for_check = None
+            self._spacing_for_check = None
         if "max_events" in values and values["max_events"] < 0:
             raise ValueError(f"max_events must be >= 0, got {values['max_events']}")
         if "ws_ready_timeout" in values and not 0 < values["ws_ready_timeout"] <= self.WS_READY_TIMEOUT_MAX_S:
@@ -600,9 +649,11 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         changes = self._reconfigure_kc705(plan)
         if any(key in plan for key in PIXEL_KEYS):
             changes.append("pixels reconfigured over I2C: " + self._configure_pixels())
-        if "fc_grammar" in plan and "fast_command_memo" not in plan and "prescale_factor" not in plan:
+        if (("fc_grammar" in plan or "qinj_spacing_bx" in plan)
+                and "fast_command_memo" not in plan and "prescale_factor" not in plan):
             self.configure_memo_FC()
-            changes.append(f"FC memory reprogrammed from '{self.fast_command_memo}' ({self.fc_grammar} grammar)")
+            changes.append(f"FC memory reprogrammed from '{self.fast_command_memo}' ({self.fc_grammar} grammar, "
+                           f"injections {self.qinj_spacing_bx} BX apart)")
         return changes
 
     # ------------------------------------------------------- ERROR and Ctrl-C
@@ -627,7 +678,7 @@ class EtrocWaveform(KC705RegisterCommands, EtrocReconfigure, EtrocLifecycle, Sat
         """Restore Reg15 if a run set the WS channel, idle the fast commands, read back, close socket and I2C."""
         steps = []
         if getattr(self, "_ws_run_active", False):
-            steps.append(("Reg15 restore", self.do_stopping, self._verify_reg15_restored))
+            steps.append(("Reg15 restore", lambda: self.do_stopping(readback=False), self._verify_reg15_restored))
         text = self._kc705_quiesce(reason, steps)
         if self.__dict__.get("_run_thread_stuck"):
             return text + "; I2C adapter left open (the run thread may still be reading the waveform sampler)"

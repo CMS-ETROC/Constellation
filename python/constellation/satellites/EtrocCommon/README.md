@@ -174,7 +174,10 @@ loader imports only the files it was installed with, so a new module (e.g.
   injections for `repeatedQInj=N` (and N L1As with `L1ARange`), 16 BX apart or spread with
   `uniform`, and refuses schedules beyond the orbit (`uniform` above N = 187, more than 191
   L1As). `fc_grammar = "legacy"` keeps the ETROC2v2 arithmetic (N+1 injections) for
-  comparison. `get_fc_schedule` returns the BX addresses written and played;
+  comparison. `qinj_spacing_bx` (default 16, fixed grammar only, 1-3563, reconfigurable)
+  sets the BX between injections of a `repeatedQInj` train (17 or 20 test the spacing; a
+  train that would pass the orbit end is refused, e.g. 200 x 20 BX; 178 x 20 fits); the
+  legacy grammar refuses any value but 16. `get_fc_schedule` returns the BX addresses written and played;
   `read_fpga_counters` (ORBIT) returns the KC705 counters of the next 1 s window
   (header = L1As answered per window); after a failed read the late replies are discarded
   before Reg13 is restored, so the shared command stream stays in step.
@@ -193,6 +196,11 @@ loader imports only the files it was installed with, so a new module (e.g.
   `ws_sel1` (1 = VGA amplifier) and `ws_sel2` (1 = power on 400 ns after ws_start) are the
   regOut1F mode bits `ws_start_sampling` writes (default 0, 0 = regOut1F 0x0b as before).
   `ws_run_summary.json` and `get_ws_status` record them with the baselines.
+  `pixel_readback` (default false, reconfigurable) reads back, over I2C, the pixel-config
+  fields QInjEn, QSel, RFSel, DAC, TH_offset, disDataReadout, disTrigPath and enable_TDC of
+  `ws_pixel` and `trigger_pixels` at every start (before the sampler starts) and every stop;
+  `ws_run_summary.json` and `get_ws_status` carry them under `pixel_readback` ("start",
+  "stop": values per chip and pixel, or the error; a failed read never fails the run).
 - `reconfigure` (ORBIT only) takes a dictionary of keys and applies them through the
   launch code: register keys are written and read back (the reply lists e.g.
   `polarity = 0x4123 (Reg14 read back 0x4123)`), a new `fast_command_memo` or
@@ -206,7 +214,7 @@ loader imports only the files it was installed with, so a new module (e.g.
   | Type | Keys |
   |---|---|
   | EtrocTransmitter | `active_channel`, `timestamp`, `triggerbit_delay`, `polarity`, `counter_duration`, `fc_delays`, `data_delays_01`, `data_delays_23`, `prescale_factor`, `fast_command_memo`, `num_fifo_read`, `clear_fifo`, `reset_counter`, `firmware`, `drain_on_stop`, `drain_timeout`, `post_start_sleep_s` |
-  | EtrocWaveform | the EtrocTransmitter keys (without the drain keys), `ws_active_channel`, `active_boards`, `fc_grammar`, `max_events`, `ws_ready_timeout`, the pixel keys `ws_pixel`, `qsel`, `qinj_en`, `offset`, `trigger_pixels`, `rfsel` (rerun the launch's pixel sequence over I2C), `ws_sel1`, `ws_sel2` (next ws start) |
+  | EtrocWaveform | the EtrocTransmitter keys (without the drain keys), `ws_active_channel`, `active_boards`, `fc_grammar`, `max_events`, `ws_ready_timeout`, the pixel keys `ws_pixel`, `qsel`, `qinj_en`, `offset`, `trigger_pixels`, `rfsel` (rerun the launch's pixel sequence over I2C), `ws_sel1`, `ws_sel2` (next ws start), `qinj_spacing_bx` (reprograms the FC memory), `pixel_readback` |
   | EtrocReceiver | `translate`, `skip_fillers`, `keep_time`, `flush_interval` (takes effect at the next start) |
   | EtrocCounters | `channel`, `fc_mode_on_launch`, `prescale_factor`, `check_layout`, `settle_windows`, `l1a_delay`, the `kc705_registers` section (keys present at initialize); refused while a scan runs |
 
